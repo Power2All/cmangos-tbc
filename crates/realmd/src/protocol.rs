@@ -195,16 +195,6 @@ pub struct AuthLogonPinData {
 }
 
 impl AuthLogonPinData {
-    pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        if data.len() < 36 {
-            return None;
-        }
-        let mut salt = [0u8; 16];
-        salt.copy_from_slice(&data[0..16]);
-        let mut hash = [0u8; 20];
-        hash.copy_from_slice(&data[16..36]);
-        Some(AuthLogonPinData { salt, hash })
-    }
 }
 
 /// Logon Proof sent to client (post-2.x builds)

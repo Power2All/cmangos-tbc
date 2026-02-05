@@ -2,6 +2,7 @@
 members = [
     "crates/shared",
     "crates/realmd",
+    "crates/extractors",
 ]
 resolver = "2"
 

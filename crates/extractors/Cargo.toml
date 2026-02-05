@@ -1,0 +1,19 @@
+[package]
+name = "extractors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "extractors"
+path = "src/main.rs"
+
+[dependencies]
+mangos-shared = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+byteorder = { workspace = true }
+mpq = "0.8.1"
+wow-adt = "0.6.1"
+wow-wdt = "0.6.1"
