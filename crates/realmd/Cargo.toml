@@ -1,0 +1,50 @@
+[package]
+name = "realmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "realmd"
+path = "src/main.rs"
+
+[dependencies]
+mangos-shared = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Crypto
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+sha1 = { workspace = true }
+hmac = { workspace = true }
+digest = { workspace = true }
+rand = { workspace = true }
+data-encoding = { workspace = true }
+
+# Serialization
+bytes = { workspace = true }
+byteorder = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Config
+clap = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+ctrlc = { workspace = true }
+signal-hook = { workspace = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "^0.1"

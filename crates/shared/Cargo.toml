@@ -1,0 +1,43 @@
+[package]
+name = "mangos-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Async
+tokio = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Crypto
+num-bigint = { workspace = true, features = ["rand"] }
+num-traits = { workspace = true }
+num-integer = { workspace = true }
+sha1 = { workspace = true }
+md-5 = { workspace = true }
+hmac = { workspace = true }
+digest = { workspace = true }
+rand = { workspace = true }
+data-encoding = { workspace = true }
+
+# Serialization
+bytes = { workspace = true }
+byteorder = { workspace = true }
+serde = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+# Config
+configparser = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }

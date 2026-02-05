@@ -1,0 +1,85 @@
+############################################
+# MaNGOS realmd configuration file (Rust)
+#
+# 	To overwrite configuration fields with environment variables
+# 	use the following pattern to generate environment variable names:
+#
+# 		For WrongPass.MaxCount:
+# 			export Realmd_WrongPass_MaxCount=10
+#
+# 		For RealmServerPort:
+# 			export Realmd_RealmServerPort=3333
+#
+############################################
+
+[RealmdConf]
+ConfVersion=2021031501
+
+###################################################################################################################
+# REALMD SETTINGS
+#
+#    LoginDatabaseInfo
+#        Database connection settings for the realm server.
+#        Supports two formats:
+#
+#        Legacy CMaNGOS format:
+#            hostname;port;username;password;database
+#
+#        URL format (recommended):
+#            mysql://username:password@hostname:port/database
+#            postgres://username:password@hostname:port/database
+#            sqlite://path/to/db.sqlite
+#
+#    LogsDir
+#         Logs directory setting.
+#         Important: Logs dir must exist, or all logs will be disabled
+#         Default: "" - no log directory prefix. If log names aren't absolute paths
+#                       then logs will be stored in the current directory of the running program.
+#
+#    MaxPingTime
+#         Settings for maximum database-ping interval (minutes between pings)
+#
+#    RealmServerPort
+#         Port on which the server will listen
+#
+#    BindIP
+#         Bind Realm Server to specific IP address
+#         This option is useful for running multiple worldd/realmd instances
+#         on different IP addresses using default ports.
+#         DO NOT CHANGE THIS UNLESS YOU _REALLY_ KNOW WHAT YOU'RE DOING
+#
+#    RealmsStateUpdateDelay
+#        Realm list Update up delay (updated at realm list request if delay expired).
+#        Default: 20
+#                 0  (Disabled)
+#
+#    StrictVersionCheck
+#        Description: Prevent modified clients from connecting
+#        Default:     0 - (Disabled)
+#                     1 - (Enabled)
+#
+#    WrongPass.MaxCount
+#        Number of login attempts with wrong password before the account or IP is banned
+#        Default: 0  (Never ban)
+#
+#    WrongPass.BanTime
+#        Duration of the ban in seconds (0 means permanent ban)
+#        Default: 600
+#
+#    WrongPass.BanType
+#        Ban the IP or account on which login is attempted
+#        Default: 0 (Ban IP)
+#                 1 (Ban Account)
+#
+###################################################################################################################
+
+LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;tbcrealmd"
+LogsDir = ""
+MaxPingTime = 30
+RealmServerPort = 3724
+BindIP = "0.0.0.0"
+RealmsStateUpdateDelay = 20
+StrictVersionCheck = 0
+WrongPass.MaxCount = 0
+WrongPass.BanTime = 600
+WrongPass.BanType = 0
