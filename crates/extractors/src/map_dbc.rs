@@ -325,7 +325,17 @@ fn extract_maps(mpq: &mut MpqManager, output_path: &Path, config: &ExtractConfig
             continue;
         };
 
-        let wdt = read_wdt(&wdt_bytes)?;
+        let wdt = match read_wdt(&wdt_bytes) {
+            Ok(wdt) => wdt,
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("Missing required chunk: MVER") {
+                    tracing::warn!("Skipping map {} due to WDT parse error: {}", map.name, err);
+                    continue;
+                }
+                return Err(err);
+            }
+        };
 
         for y in 0..WDT_MAP_SIZE {
             for x in 0..WDT_MAP_SIZE {
