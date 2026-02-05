@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Build information for supported client versions
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RealmBuildInfo {
     pub build: u16,
     pub major_version: u8,
@@ -269,7 +270,7 @@ impl RealmList {
                         find_build_info(first_build as u16)
                             .filter(|b| b.build == first_build as u16)
                             .cloned()
-                            .unwrap_or_else(|| RealmBuildInfo {
+                            .unwrap_or(RealmBuildInfo {
                                 build: first_build as u16,
                                 major_version: 0,
                                 minor_version: 0,

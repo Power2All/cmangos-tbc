@@ -99,8 +99,8 @@ impl SRP6 {
         sha.finalize();
 
         // H(N) XOR H(g)
-        for i in 0..20 {
-            hash[i] ^= sha.get_digest()[i];
+        for (i, byte) in hash.iter_mut().enumerate().take(20) {
+            *byte ^= sha.get_digest()[i];
         }
 
         // H(username)

@@ -100,7 +100,7 @@ impl BigNumber {
     /// Get the number of bytes needed to represent this number
     pub fn get_num_bytes(&self) -> usize {
         let bits = self.bn.bits() as usize;
-        (bits + 7) / 8
+        bits.div_ceil(8)
     }
 
     /// Get as a u32 value

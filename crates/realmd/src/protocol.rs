@@ -9,6 +9,7 @@ use mangos_shared::util::ByteBuffer;
 /// Logon Challenge header (received from client)
 /// Packed struct: cmd (1) + error (1) + size (2)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthLogonChallengeHeader {
     pub error: u8,
     pub size: u16,
@@ -31,6 +32,7 @@ impl AuthLogonChallengeHeader {
 /// Logon Challenge body (received from client)
 /// Contains client information: game version, platform, OS, locale, IP, username
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthLogonChallengeBody {
     pub gamename: [u8; 4],
     pub version1: u8,
@@ -137,6 +139,7 @@ impl AuthLogonChallengeBody {
 
 /// Logon Proof received from client (CMD_AUTH_LOGON_PROOF)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthLogonProofClient {
     pub a: [u8; 32],         // Client public ephemeral
     pub m1: [u8; 20],        // Client proof
@@ -185,6 +188,7 @@ impl AuthLogonProofClient {
 
 /// PIN data from client (classic only)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthLogonPinData {
     pub salt: [u8; 16],
     pub hash: [u8; 20],
@@ -253,6 +257,7 @@ impl AuthLogonProofServerLegacy {
 
 /// Reconnect Proof received from client
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuthReconnectProofClient {
     pub r1: [u8; 16],
     pub r2: [u8; 20],

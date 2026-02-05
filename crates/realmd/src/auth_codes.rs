@@ -38,6 +38,7 @@ impl AuthCmd {
 /// Authentication result codes sent to the client
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum AuthLogonResult {
     Success = 0x00,
     FailedUnknown0 = 0x01,
@@ -63,6 +64,7 @@ pub enum AuthLogonResult {
 /// Account flags
 #[derive(Debug, Clone, Copy)]
 #[repr(u32)]
+#[allow(dead_code)]
 pub enum AccountFlags {
     Gm = 0x00000001,
     Trial = 0x00000008,
@@ -72,6 +74,7 @@ pub enum AccountFlags {
 /// Security flags for authenticator/PIN support
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum SecurityFlags {
     None = 0x00,
     Pin = 0x01,

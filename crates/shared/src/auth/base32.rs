@@ -23,7 +23,7 @@ pub fn base32_decode(input: &str) -> Result<Vec<u8>, String> {
         .collect();
 
     // Pad to multiple of 8 with '='
-    let padded = if cleaned.len() % 8 != 0 {
+    let padded = if !cleaned.len().is_multiple_of(8) {
         let pad_len = 8 - (cleaned.len() % 8);
         format!("{}{}", cleaned, "=".repeat(pad_len))
     } else {

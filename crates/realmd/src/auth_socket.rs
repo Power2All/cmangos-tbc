@@ -228,6 +228,7 @@ pub async fn handle_client(
 }
 
 /// Handle CMD_AUTH_LOGON_CHALLENGE
+#[allow(clippy::too_many_arguments)]
 async fn handle_logon_challenge(
     stream: &mut TcpStream,
     addr: &SocketAddr,
@@ -552,6 +553,7 @@ async fn handle_logon_challenge(
 }
 
 /// Handle CMD_AUTH_LOGON_PROOF
+#[allow(clippy::too_many_arguments)]
 async fn handle_logon_proof(
     stream: &mut TcpStream,
     addr: &SocketAddr,
@@ -568,7 +570,7 @@ async fn handle_logon_proof(
     prompt_pin: bool,
     _server_security_salt: &BigNumber,
     _grid_seed: u32,
-    account_security_level: &mut AccountTypes,
+    _account_security_level: &mut AccountTypes,
 ) -> Result<(), anyhow::Error> {
     // Read the proof data
     let proof_size = if prompt_pin {
@@ -762,6 +764,7 @@ async fn handle_failed_login(db: &Database, login: &str, safe_login: &str, addr:
 }
 
 /// Verify client version and finalize authentication
+#[allow(clippy::too_many_arguments)]
 async fn verify_and_finalize(
     stream: &mut TcpStream,
     addr: &SocketAddr,
@@ -869,6 +872,7 @@ async fn send_proof(
 }
 
 /// Handle CMD_AUTH_RECONNECT_CHALLENGE
+#[allow(clippy::too_many_arguments)]
 async fn handle_reconnect_challenge(
     stream: &mut TcpStream,
     addr: &SocketAddr,
@@ -945,6 +949,7 @@ async fn handle_reconnect_challenge(
 }
 
 /// Handle CMD_AUTH_RECONNECT_PROOF
+#[allow(clippy::too_many_arguments)]
 async fn handle_reconnect_proof(
     stream: &mut TcpStream,
     _addr: &SocketAddr,
@@ -1009,6 +1014,7 @@ async fn handle_reconnect_proof(
 }
 
 /// Handle CMD_REALM_LIST
+#[allow(clippy::too_many_arguments)]
 async fn handle_realm_list(
     stream: &mut TcpStream,
     _addr: &SocketAddr,
@@ -1238,9 +1244,8 @@ fn verify_version(build: u16, os: &str, a: &[u8], version_proof: &[u8], is_recon
     tracing::trace!("Verifying client version hash: build={} os='{}' reconnect={}", build, os, is_reconnect);
 
     let zeros = [0u8; 20];
-    let version_hash: &[u8; 20];
 
-    if !is_reconnect {
+    let version_hash: &[u8; 20] = if !is_reconnect {
         let build_info = match find_build_info(build) {
             Some(info) => info,
             None => {
@@ -1263,10 +1268,10 @@ fn verify_version(build: u16, os: &str, a: &[u8], version_proof: &[u8], is_recon
             return true; // not filled serverside
         }
 
-        version_hash = hash;
+        hash
     } else {
-        version_hash = &zeros;
-    }
+        &zeros
+    };
 
     let mut sha = Sha1Hash::new();
     sha.update_data_bytes(a);

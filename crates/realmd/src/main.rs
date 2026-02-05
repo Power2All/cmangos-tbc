@@ -49,7 +49,6 @@ struct Args {
 
 /// Global stop signal
 static STOP_EVENT: AtomicBool = AtomicBool::new(false);
-static RESTART: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -97,7 +97,6 @@ pub fn initialize_logging(log_dir: Option<&str>, console_level: &str, file_level
 
 /// Convenience macros that map to the C++ logging functions
 /// These re-export tracing macros with the naming convention from the C++ code
-
 #[macro_export]
 macro_rules! basic_log {
     ($($arg:tt)*) => { tracing::info!($($arg)*) };
