@@ -36,6 +36,24 @@ ConfVersion=2021031501
 #         Default: "" - no log directory prefix. If log names aren't absolute paths
 #                       then logs will be stored in the current directory of the running program.
 #
+#    LogLevel
+#         Server console level of logging
+#         0 = Minimum (errors only)
+#         1 = Error   (errors + warnings)
+#         2 = Detail  (normal operation, default)
+#         3 = Full    (debug-level: connections, queries, state changes)
+#         4 = Trace   (everything: packet data, SRP6 internals, version checks)
+#         Default: 2
+#
+#         Can also be overridden:
+#           - CLI:  realmd --log-level 3
+#           - Env:  RUST_LOG=debug    (standard Rust logging env var, takes highest priority)
+#
+#    LogFileLevel
+#         Server file level of logging (same scale as LogLevel)
+#         Allows file logging at a different verbosity than console.
+#         Default: same as LogLevel
+#
 #    MaxPingTime
 #         Settings for maximum database-ping interval (minutes between pings)
 #
@@ -71,10 +89,29 @@ ConfVersion=2021031501
 #        Default: 0 (Ban IP)
 #                 1 (Ban Account)
 #
+#    AutoCreateAccounts
+#        Automatically create a new account when a player tries to log in
+#        with a username that does not yet exist. The password used during
+#        the first login attempt becomes the account's password.
+#
+#        WARNING: This is intended for DEVELOPMENT and TESTING only.
+#                 Do NOT enable this on a public server.
+#
+#        Default: 0 - (Disabled)
+#                 1 - (Enabled)
+#
+#    AutoCreateAccounts.Expansion
+#        The expansion level granted to auto-created accounts.
+#        0 = Classic (no expansion)
+#        1 = The Burning Crusade
+#        Default: 1
+#
 ###################################################################################################################
 
 LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;tbcrealmd"
 LogsDir = ""
+LogLevel = 2
+LogFileLevel = 2
 MaxPingTime = 30
 RealmServerPort = 3724
 BindIP = "0.0.0.0"
@@ -83,3 +120,5 @@ StrictVersionCheck = 0
 WrongPass.MaxCount = 0
 WrongPass.BanTime = 600
 WrongPass.BanType = 0
+AutoCreateAccounts = 0
+AutoCreateAccounts.Expansion = 1

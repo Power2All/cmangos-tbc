@@ -44,7 +44,7 @@ pub async fn handle_client(
     db: Arc<Database>,
     realm_list: Arc<tokio::sync::RwLock<RealmList>>,
 ) {
-    tracing::debug!("New connection from {}", addr);
+    tracing::debug!("[{}] New connection accepted", addr);
 
     let mut status = SessionStatus::Challenge;
     let mut srp = SRP6::new();
@@ -70,11 +70,11 @@ pub async fn handle_client(
         let cmd_byte = match timeout(timeout_duration, stream.read_u8()).await {
             Ok(Ok(byte)) => byte,
             Ok(Err(e)) => {
-                tracing::debug!("Connection closed from {}: {}", addr, e);
+                tracing::debug!("[{}] Connection closed: {}", addr, e);
                 return;
             }
             Err(_) => {
-                tracing::debug!("Connection timeout from {}", addr);
+                tracing::debug!("[{}] Connection timeout after {}s of inactivity", addr, timeout_duration.as_secs());
                 return;
             }
         };
@@ -82,12 +82,12 @@ pub async fn handle_client(
         let cmd = match AuthCmd::from_u8(cmd_byte) {
             Some(cmd) => cmd,
             None => {
-                tracing::debug!("Unknown command {:02x} from {}", cmd_byte, addr);
+                tracing::debug!("[{}] Received unknown command byte: 0x{:02X}", addr, cmd_byte);
                 return;
             }
         };
 
-        tracing::trace!("Got command {:?} from {} (status: {:?})", cmd, addr, status);
+        tracing::debug!("[{}] Received command {:?} (0x{:02X}) in state {:?}", addr, cmd, cmd_byte, status);
 
         // Check if the command is valid for the current status
         let expected_status = match cmd {
@@ -102,10 +102,8 @@ pub async fn handle_client(
 
         if expected_status != status {
             tracing::debug!(
-                "Unauthorized command {:?} in state {:?} from {}",
-                cmd,
-                status,
-                addr
+                "[{}] Unauthorized command {:?} in state {:?} (expected {:?}), disconnecting",
+                addr, cmd, status, expected_status
             );
             return;
         }
@@ -196,29 +194,36 @@ pub async fn handle_client(
                 .await
             }
             AuthCmd::XferResume => {
-                // Skip 8 bytes
+                tracing::debug!("[{}] XferResume - skipping 8 bytes", addr);
                 let mut buf = [0u8; 8];
                 let _ = stream.read_exact(&mut buf).await;
                 Ok(())
             }
             AuthCmd::XferCancel => {
+                tracing::debug!("[{}] XferCancel - disconnecting", addr);
                 return;
             }
-            AuthCmd::XferAccept => Ok(()),
+            AuthCmd::XferAccept => {
+                tracing::debug!("[{}] XferAccept received", addr);
+                Ok(())
+            }
             _ => {
-                tracing::debug!("Unhandled command {:?}", cmd);
+                tracing::debug!("[{}] Unhandled command {:?}", addr, cmd);
                 return;
             }
         };
 
-        if result.is_err() {
-            tracing::debug!("Handler failed for {:?} from {}", cmd, addr);
+        if let Err(e) = result {
+            tracing::debug!("[{}] Handler error for {:?}: {}", addr, cmd, e);
             return;
         }
 
         if status == SessionStatus::Closed {
+            tracing::debug!("[{}] Session closed, disconnecting", addr);
             return;
         }
+
+        tracing::trace!("[{}] Command {:?} completed, new state: {:?}", addr, cmd, status);
     }
 }
 
@@ -237,7 +242,7 @@ async fn handle_logon_challenge(
     locale: &mut String,
     safe_locale: &mut String,
     build: &mut u16,
-    account_security_level: &mut AccountTypes,
+    _account_security_level: &mut AccountTypes,
     server_security_salt: &mut BigNumber,
     grid_seed: &mut u32,
     prompt_pin: &mut bool,
@@ -250,7 +255,10 @@ async fn handle_logon_challenge(
         .ok_or_else(|| anyhow::anyhow!("Invalid logon challenge header"))?;
 
     let remaining = header.size as usize;
+    tracing::trace!("[{}] LogonChallenge header: size={}", addr, remaining);
+
     if remaining < AuthLogonChallengeBody::MIN_SIZE - AUTH_LOGON_MAX_NAME {
+        tracing::debug!("[{}] LogonChallenge body too small: {} bytes", addr, remaining);
         return Err(anyhow::anyhow!("Logon challenge body too small"));
     }
 
@@ -265,10 +273,9 @@ async fn handle_logon_challenge(
         .ok_or_else(|| anyhow::anyhow!("Invalid logon challenge body"))?;
 
     if body.username_len as usize > AUTH_LOGON_MAX_NAME {
+        tracing::debug!("[{}] Username too long: {} chars", addr, body.username_len);
         return Err(anyhow::anyhow!("Username too long"));
     }
-
-    tracing::trace!("Logon challenge from '{}' build {}", body.username_string(), body.build);
 
     // Store client info
     *login = body.username_string();
@@ -276,6 +283,11 @@ async fn handle_logon_challenge(
     *os = body.os_string();
     *platform = body.platform_string();
     *locale = body.locale_string();
+
+    tracing::debug!(
+        "[{}] LogonChallenge: account='{}' build={} os='{}' platform='{}' locale='{}'",
+        addr, login, build, os, platform, locale
+    );
 
     // Escape for SQL safety
     *safe_login = Database::escape_string(login);
@@ -295,9 +307,11 @@ async fn handle_logon_challenge(
         Database::escape_string(&ip_str)
     );
 
+    tracing::trace!("[{}] Checking IP ban for {}", addr, ip_str);
+
     if let Ok(Some(_)) = db.query_one(&ip_ban_sql).await {
         pkt.write_u8(AuthLogonResult::FailedFailNoaccess as u8);
-        tracing::info!("Banned ip {} tries to login!", ip_str);
+        tracing::info!("[{}] Banned IP {} tried to login", addr, ip_str);
         stream.write_all(pkt.contents()).await?;
         return Ok(());
     }
@@ -305,40 +319,52 @@ async fn handle_logon_challenge(
     // Get account details
     let account_sql = format!(
         "SELECT id, CAST(locked AS SIGNED) AS locked, lockedIp, \
-         CAST(gmlevel AS SIGNED) AS gmlevel, v, s, token \
+         CAST(gmlevel AS SIGNED) AS gmlevel, \
+         CAST(v AS CHAR) AS v, CAST(s AS CHAR) AS s, \
+         CAST(token AS CHAR) AS token \
          FROM account WHERE username = '{}'",
         safe_login
     );
 
+    tracing::trace!("[{}] Looking up account '{}'", addr, login);
+
     match db.query_one(&account_sql).await? {
         Some(row) => {
+            let account_id: u32 = row.get_u32(0);
             let locked: u8 = row.get_u8(1);
+
+            tracing::debug!(
+                "[{}] Account '{}' found: id={} locked={} gmlevel={}",
+                addr, login, account_id, locked, row.get_u8(3)
+            );
 
             // Check IP lock
             if locked == 1 {
                 let locked_ip: String = row.get_string(2);
-                tracing::debug!("Account '{}' is locked to IP '{}'", login, locked_ip);
+                tracing::debug!("[{}] Account '{}' is locked to IP '{}'", addr, login, locked_ip);
                 if locked_ip != ip_str {
-                    tracing::debug!("Account IP differs, rejecting");
+                    tracing::info!("[{}] Account '{}' IP lock mismatch: expected='{}' got='{}'", addr, login, locked_ip, ip_str);
                     pkt.write_u8(AuthLogonResult::FailedSuspended as u8);
                     stream.write_all(pkt.contents()).await?;
                     return Ok(());
                 }
+                tracing::trace!("[{}] Account '{}' IP lock verified", addr, login);
             }
 
             let database_v: String = row.get_string(4);
             let database_s: String = row.get_string(5);
 
+            tracing::trace!("[{}] SRP6 verifier length: {} salt length: {}", addr, database_v.len(), database_s.len());
+
             // Set SRP6 verifier and salt
             if !srp.set_verifier(&database_v) || !srp.set_salt(&database_s) {
                 pkt.write_u8(AuthLogonResult::FailedFailNoaccess as u8);
-                tracing::debug!("Broken v/s values for account {}!", login);
+                tracing::warn!("[{}] Broken v/s values for account '{}'", addr, login);
                 stream.write_all(pkt.contents()).await?;
                 return Ok(());
             }
 
             // Check account ban
-            let account_id: u32 = row.get_u32(0);
             let ban_sql = format!(
                 "SELECT banned_at, expires_at FROM account_banned \
                  WHERE account_id = {} AND CAST(active AS SIGNED) = 1 AND \
@@ -346,22 +372,28 @@ async fn handle_logon_challenge(
                 account_id
             );
 
+            tracing::trace!("[{}] Checking account ban for id={}", addr, account_id);
+
             if let Ok(Some(ban_row)) = db.query_one(&ban_sql).await {
                 let banned_at: u64 = ban_row.get_u64(0);
                 let expires_at: u64 = ban_row.get_u64(1);
 
                 if banned_at == expires_at {
                     pkt.write_u8(AuthLogonResult::FailedBanned as u8);
-                    tracing::info!("Banned account {} tries to login!", login);
+                    tracing::info!("[{}] Permanently banned account '{}' (id={}) tried to login", addr, login, account_id);
                 } else {
                     pkt.write_u8(AuthLogonResult::FailedSuspended as u8);
-                    tracing::info!("Temporarily banned account {} tries to login!", login);
+                    tracing::info!(
+                        "[{}] Temporarily banned account '{}' (id={}) tried to login (expires at {})",
+                        addr, login, account_id, expires_at
+                    );
                 }
                 stream.write_all(pkt.contents()).await?;
                 return Ok(());
             }
 
             // Generate SRP6 challenge
+            tracing::trace!("[{}] Generating SRP6 challenge for '{}'", addr, login);
             srp.calculate_host_public_ephemeral();
 
             pkt.write_u8(AuthLogonResult::Success as u8);
@@ -392,10 +424,12 @@ async fn handle_logon_challenge(
             if !token.is_empty() && *build >= 8606 {
                 // Authenticator was added in 2.4.3
                 security_flags = SecurityFlags::Authenticator as u8;
+                tracing::debug!("[{}] Account '{}' has authenticator token (build {})", addr, login, build);
             }
 
             if !token.is_empty() && *build <= 6141 {
                 security_flags = SecurityFlags::Pin as u8;
+                tracing::debug!("[{}] Account '{}' using PIN mode (build {})", addr, login, build);
             }
 
             pkt.write_u8(security_flags);
@@ -406,6 +440,7 @@ async fn handle_logon_challenge(
                 server_security_salt.set_rand(16 * 8);
                 pkt.append(&server_security_salt.as_byte_array(16)[..16]);
                 *prompt_pin = true;
+                tracing::trace!("[{}] PIN challenge generated for '{}'", addr, login);
             }
 
             if security_flags & SecurityFlags::Unk as u8 != 0 {
@@ -421,16 +456,94 @@ async fn handle_logon_challenge(
             }
 
             let sec_level: u8 = row.get_u8(3);
-            *account_security_level = if sec_level <= SEC_ADMINISTRATOR {
+            *_account_security_level = if sec_level <= SEC_ADMINISTRATOR {
                 sec_level
             } else {
                 SEC_ADMINISTRATOR
             };
 
             *status = SessionStatus::LogonProof;
+            tracing::debug!(
+                "[{}] LogonChallenge SUCCESS for '{}': security_flags=0x{:02X} response_size={} bytes",
+                addr, login, security_flags, pkt.size()
+            );
         }
         None => {
-            pkt.write_u8(AuthLogonResult::FailedUnknownAccount as u8);
+            // Check if auto-create is enabled
+            let auto_create = {
+                let config = get_config().lock();
+                config.get_bool_default("AutoCreateAccounts", false)
+            };
+
+            if auto_create {
+                tracing::info!(
+                    "[{}] Account '{}' not found, auto-creating (AutoCreateAccounts enabled)",
+                    addr, login
+                );
+
+                match auto_create_account(db, login, safe_login).await {
+                    Ok(()) => {
+                        tracing::info!("[{}] Account '{}' auto-created successfully (password = username)", addr, login);
+
+                        // Re-query the freshly created account and proceed with challenge
+                        match db.query_one(&account_sql).await? {
+                            Some(row) => {
+                                let database_v: String = row.get_string(4);
+                                let database_s: String = row.get_string(5);
+
+                                if !srp.set_verifier(&database_v) || !srp.set_salt(&database_s) {
+                                    pkt.write_u8(AuthLogonResult::FailedFailNoaccess as u8);
+                                    tracing::error!("[{}] Auto-created account '{}' has broken v/s values", addr, login);
+                                    stream.write_all(pkt.contents()).await?;
+                                    return Ok(());
+                                }
+
+                                // Generate SRP6 challenge
+                                srp.calculate_host_public_ephemeral();
+
+                                pkt.write_u8(AuthLogonResult::Success as u8);
+                                pkt.append(&srp.get_host_public_ephemeral().as_byte_array(32));
+                                pkt.write_u8(1);
+                                pkt.append(&srp.get_generator_modulo().as_byte_array(0));
+                                pkt.write_u8(32);
+                                pkt.append(&srp.get_prime().as_byte_array(32));
+
+                                let mut salt_bn = BigNumber::new();
+                                salt_bn.set_hex_str(&database_s);
+                                pkt.append(&salt_bn.as_byte_array(0));
+                                pkt.append(&VERSION_CHALLENGE);
+
+                                // No authenticator/PIN for auto-created accounts
+                                pkt.write_u8(0);
+
+                                let sec_level: u8 = row.get_u8(3);
+                                *_account_security_level = if sec_level <= SEC_ADMINISTRATOR {
+                                    sec_level
+                                } else {
+                                    SEC_ADMINISTRATOR
+                                };
+
+                                *status = SessionStatus::LogonProof;
+                                tracing::debug!(
+                                    "[{}] LogonChallenge SUCCESS for auto-created '{}': response_size={} bytes",
+                                    addr, login, pkt.size()
+                                );
+                            }
+                            None => {
+                                pkt.write_u8(AuthLogonResult::FailedUnknownAccount as u8);
+                                tracing::error!("[{}] Auto-created account '{}' not found after insert", addr, login);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        pkt.write_u8(AuthLogonResult::FailedUnknownAccount as u8);
+                        tracing::error!("[{}] Failed to auto-create account '{}': {}", addr, login, e);
+                    }
+                }
+            } else {
+                pkt.write_u8(AuthLogonResult::FailedUnknownAccount as u8);
+                tracing::info!("[{}] Unknown account '{}' tried to login", addr, login);
+            }
         }
     }
 
@@ -464,6 +577,8 @@ async fn handle_logon_proof(
         AuthLogonProofClient::SIZE_WITHOUT_PIN
     };
 
+    tracing::trace!("[{}] Reading LogonProof: {} bytes (pin={})", addr, proof_size, prompt_pin);
+
     let mut proof_buf = vec![0u8; proof_size];
     stream.read_exact(&mut proof_buf).await?;
 
@@ -478,77 +593,83 @@ async fn handle_logon_proof(
         pkt.write_u8(AuthCmd::LogonChallenge as u8);
         pkt.write_u8(0x00);
         pkt.write_u8(AuthLogonResult::FailedVersionInvalid as u8);
-        tracing::info!("Account {} tried to login with invalid client version {}!", login, build);
+        tracing::info!("[{}] Account '{}' tried to login with unsupported build {}", addr, login, build);
         stream.write_all(pkt.contents()).await?;
         return Ok(());
     }
 
     // Calculate session key
+    tracing::trace!("[{}] Calculating SRP6 session key for '{}'", addr, login);
     if !srp.calculate_session_key(&proof.a) {
-        tracing::info!("Session calculation failed for account {}!", login);
+        tracing::warn!("[{}] SRP6 session key calculation failed for '{}' (invalid A value)", addr, login);
         return Ok(());
     }
 
     srp.hash_session_key();
     srp.calculate_proof(login);
 
+    tracing::trace!("[{}] Verifying SRP6 proof for '{}'", addr, login);
+
     // Check if proof matches (password correct)
-    if srp.proof(&proof.m1) {
-        // Proof matched = password incorrect in the C++ code's logic
-        // (C++ Proof() returns false on match)
-
-        // Handle authenticator token for builds > 6141
-        if build > 6141 && (proof.security_flags & SecurityFlags::Authenticator as u8 != 0 || !token.is_empty()) {
-            // Read authenticator token
-            let mut pin_count_buf = [0u8; 1];
-            if stream.read_exact(&mut pin_count_buf).await.is_err() {
-                send_logon_proof_error(stream, build).await?;
-                return Ok(());
-            }
-            let pin_count = pin_count_buf[0];
-
-            if pin_count > 16 {
-                send_logon_proof_error(stream, build).await?;
-                return Ok(());
-            }
-
-            let mut keys = vec![0u8; pin_count as usize];
-            if stream.read_exact(&mut keys).await.is_err() {
-                send_logon_proof_error(stream, build).await?;
-                return Ok(());
-            }
-
-            let client_token: i32 = String::from_utf8_lossy(&keys)
-                .parse()
-                .unwrap_or(-1);
-            let server_token = generate_token(token);
-
-            if server_token != client_token {
-                tracing::info!(
-                    "Account {} tried to login with wrong pincode! Given {} Expected {}",
-                    login,
-                    client_token,
-                    server_token
-                );
-                send_logon_proof_error(stream, build).await?;
-                return Ok(());
-            }
-
-            // Token verified, proceed to finalize
-            verify_and_finalize(stream, addr, db, status, srp, login, safe_login, safe_locale, os, platform, build, &proof).await?;
-            return Ok(());
-        }
-
-        // No authenticator, just wrong password
+    // srp.proof() returns true when client M1 matches our computed M = password correct
+    if !srp.proof(&proof.m1) {
+        // Proof did NOT match = wrong password
         send_logon_proof_error(stream, build).await?;
-        tracing::info!("Account {} tried to login with wrong password!", login);
+        tracing::info!("[{}] Account '{}' login failed: wrong password", addr, login);
 
         // Handle failed login counting
         handle_failed_login(db, login, safe_login, addr).await;
         return Ok(());
     }
 
-    // Proof did not match = password correct
+    // Proof matched = password correct
+    tracing::debug!("[{}] SRP6 proof verified for '{}', password correct", addr, login);
+
+    // Handle authenticator token for builds > 6141
+    if build > 6141 && (proof.security_flags & SecurityFlags::Authenticator as u8 != 0 || !token.is_empty()) {
+        tracing::debug!("[{}] Reading authenticator token for '{}'", addr, login);
+        // Read authenticator token
+        let mut pin_count_buf = [0u8; 1];
+        if stream.read_exact(&mut pin_count_buf).await.is_err() {
+            tracing::debug!("[{}] Failed to read authenticator token length for '{}'", addr, login);
+            send_logon_proof_error(stream, build).await?;
+            return Ok(());
+        }
+        let pin_count = pin_count_buf[0];
+
+        if pin_count > 16 {
+            tracing::debug!("[{}] Invalid authenticator token length {} for '{}'", addr, pin_count, login);
+            send_logon_proof_error(stream, build).await?;
+            return Ok(());
+        }
+
+        let mut keys = vec![0u8; pin_count as usize];
+        if stream.read_exact(&mut keys).await.is_err() {
+            tracing::debug!("[{}] Failed to read authenticator token data for '{}'", addr, login);
+            send_logon_proof_error(stream, build).await?;
+            return Ok(());
+        }
+
+        let client_token: i32 = String::from_utf8_lossy(&keys)
+            .parse()
+            .unwrap_or(-1);
+        let server_token = generate_token(token);
+
+        tracing::trace!("[{}] Authenticator: client={} server={}", addr, client_token, server_token);
+
+        if server_token != client_token {
+            tracing::info!(
+                "[{}] Account '{}' authenticator mismatch: client={} expected={}",
+                addr, login, client_token, server_token
+            );
+            send_logon_proof_error(stream, build).await?;
+            return Ok(());
+        }
+
+        tracing::debug!("[{}] Authenticator verified for '{}'", addr, login);
+    }
+
+    // Password (and optional authenticator) verified, finalize login
     verify_and_finalize(stream, addr, db, status, srp, login, safe_login, safe_locale, os, platform, build, &proof).await?;
     Ok(())
 }
@@ -581,6 +702,7 @@ async fn handle_failed_login(db: &Database, login: &str, safe_login: &str, addr:
     };
 
     if max_wrong == 0 {
+        tracing::trace!("[{}] WrongPass.MaxCount=0, failed login counting disabled", addr);
         return;
     }
 
@@ -598,6 +720,7 @@ async fn handle_failed_login(db: &Database, login: &str, safe_login: &str, addr:
 
     if let Ok(Some(row)) = db.query_one(&sql).await {
         let failed_logins: u32 = row.get_u32(1);
+        tracing::debug!("[{}] Account '{}' failed login count: {}/{}", addr, login, failed_logins, max_wrong);
 
         if failed_logins >= max_wrong {
             let (ban_time, ban_type) = {
@@ -617,11 +740,9 @@ async fn handle_failed_login(db: &Database, login: &str, safe_login: &str, addr:
                         acc_id, ban_time
                     ))
                     .await;
-                tracing::info!(
-                    "Account {} got banned for {} seconds (failed {} times)",
-                    login,
-                    ban_time,
-                    failed_logins
+                tracing::warn!(
+                    "[{}] Account '{}' (id={}) auto-banned for {}s ({} failed attempts)",
+                    addr, login, acc_id, ban_time, failed_logins
                 );
             } else {
                 let ip = Database::escape_string(&addr.ip().to_string());
@@ -631,12 +752,9 @@ async fn handle_failed_login(db: &Database, login: &str, safe_login: &str, addr:
                         ip, ban_time
                     ))
                     .await;
-                tracing::info!(
-                    "IP {} got banned for {} seconds (account {} failed {} times)",
-                    addr.ip(),
-                    ban_time,
-                    login,
-                    failed_logins
+                tracing::warn!(
+                    "[{}] IP {} auto-banned for {}s (account '{}', {} failed attempts)",
+                    addr, addr.ip(), ban_time, login, failed_logins
                 );
             }
         }
@@ -659,8 +777,10 @@ async fn verify_and_finalize(
     proof: &AuthLogonProofClient,
 ) -> Result<(), anyhow::Error> {
     // Verify version
+    tracing::trace!("[{}] Verifying client version for '{}' (build={} os='{}')", addr, login, build, os);
+
     if !verify_version(build, os, &proof.a, &proof.crc_hash, false) {
-        tracing::info!("Account {} tried to login with modified client!", login);
+        tracing::info!("[{}] Account '{}' rejected: modified client detected (build={})", addr, login, build);
         let response: [u8; 2] = [
             AuthCmd::LogonProof as u8,
             AuthLogonResult::FailedVersionInvalid as u8,
@@ -669,10 +789,12 @@ async fn verify_and_finalize(
         return Ok(());
     }
 
-    tracing::info!("User '{}' successfully authenticated", login);
+    tracing::info!("[{}] User '{}' successfully authenticated (build={} os='{}' platform='{}')", addr, login, build, os, platform);
 
     // Update session in database
     let k_hex = srp.get_strong_session_key().as_hex_str();
+    tracing::trace!("[{}] Storing session key for '{}' (length={})", addr, login, k_hex.len());
+
     let _ = db
         .execute(&format!(
             "UPDATE account SET sessionkey = '{}', locale = '{}', failed_logins = 0, os = '{}', platform = '{}' \
@@ -698,6 +820,7 @@ async fn verify_and_finalize(
                 account_id, ip, LOGIN_TYPE_REALMD
             ))
             .await;
+        tracing::debug!("[{}] Login recorded: account_id={} ip={}", addr, account_id, ip);
     }
 
     // Send proof to client
@@ -706,6 +829,7 @@ async fn verify_and_finalize(
     send_proof(stream, build, &sha).await?;
 
     *status = SessionStatus::Authed;
+    tracing::debug!("[{}] '{}' -> state Authed, ready for realm list", addr, login);
     Ok(())
 }
 
@@ -718,6 +842,7 @@ async fn send_proof(
     match build {
         5875 | 6005 | 6141 => {
             // 1.12.x client
+            tracing::trace!("Sending legacy (1.x) LogonProof response");
             let proof = AuthLogonProofServerLegacy {
                 cmd: AuthCmd::LogonProof as u8,
                 error: 0,
@@ -728,6 +853,7 @@ async fn send_proof(
         }
         _ => {
             // 2.x+ client
+            tracing::trace!("Sending standard (2.x+) LogonProof response");
             let proof = AuthLogonProofServer {
                 cmd: AuthCmd::LogonProof as u8,
                 error: 0,
@@ -762,6 +888,7 @@ async fn handle_reconnect_challenge(
         .ok_or_else(|| anyhow::anyhow!("Invalid reconnect challenge header"))?;
 
     let remaining = header.size as usize;
+    tracing::trace!("[{}] ReconnectChallenge header: size={}", addr, remaining);
 
     *status = SessionStatus::Closed;
 
@@ -773,6 +900,7 @@ async fn handle_reconnect_challenge(
         .ok_or_else(|| anyhow::anyhow!("Invalid reconnect challenge body"))?;
 
     if body.username_len > 10 {
+        tracing::debug!("[{}] ReconnectChallenge username too long: {}", addr, body.username_len);
         return Err(anyhow::anyhow!("Username too long for reconnect"));
     }
 
@@ -780,19 +908,22 @@ async fn handle_reconnect_challenge(
     *safe_login = Database::escape_string(login);
     *build = body.build;
 
+    tracing::debug!("[{}] ReconnectChallenge: account='{}' build={}", addr, login, build);
+
     // Look up session key
     let sql = format!(
-        "SELECT sessionkey FROM account WHERE username = '{}'",
+        "SELECT CAST(sessionkey AS CHAR) AS sessionkey FROM account WHERE username = '{}'",
         safe_login
     );
 
     match db.query_one(&sql).await? {
         Some(row) => {
             let session_key: String = row.get_string(0);
+            tracing::trace!("[{}] Session key found for '{}' (length={})", addr, login, session_key.len());
             srp.set_strong_session_key(&session_key);
         }
         None => {
-            tracing::error!("User {} tried to reconnect but no session key found", login);
+            tracing::info!("[{}] Reconnect failed: no session key for '{}'", addr, login);
             return Err(anyhow::anyhow!("No session key"));
         }
     }
@@ -808,6 +939,7 @@ async fn handle_reconnect_challenge(
     pkt.append(&reconnect_proof.as_byte_array(16)[..16]);
     pkt.append(&VERSION_CHALLENGE);
 
+    tracing::debug!("[{}] ReconnectChallenge SUCCESS for '{}' -> state ReconProof", addr, login);
     stream.write_all(pkt.contents()).await?;
     Ok(())
 }
@@ -834,6 +966,8 @@ async fn handle_reconnect_proof(
 
     let k = srp.get_strong_session_key();
     if login.is_empty() || reconnect_proof.get_num_bytes() == 0 || k.get_num_bytes() == 0 {
+        tracing::debug!("[{}] ReconnectProof: missing data (login='{}' proof_len={} key_len={})",
+            _addr, login, reconnect_proof.get_num_bytes(), k.get_num_bytes());
         return Ok(());
     }
 
@@ -846,9 +980,12 @@ async fn handle_reconnect_proof(
     sha.update_big_numbers(&[&t1, reconnect_proof, k]);
     sha.finalize();
 
+    tracing::trace!("[{}] Verifying reconnect proof for '{}'", _addr, login);
+
     if sha.get_digest()[..] == proof.r2[..] {
         // Verify version
         if !verify_version(build, os, &proof.r1, &proof.r3, true) {
+            tracing::info!("[{}] Reconnect failed for '{}': modified client (build={})", _addr, login, build);
             let mut pkt = ByteBuffer::new();
             pkt.write_u8(AuthCmd::ReconnectProof as u8);
             pkt.write_u8(AuthLogonResult::FailedVersionInvalid as u8);
@@ -863,8 +1000,9 @@ async fn handle_reconnect_proof(
         stream.write_all(pkt.contents()).await?;
 
         *status = SessionStatus::Authed;
+        tracing::info!("[{}] User '{}' successfully reconnected (build={})", _addr, login, build);
     } else {
-        tracing::error!("User {} tried to reconnect, but session invalid", login);
+        tracing::info!("[{}] Reconnect proof mismatch for '{}': session invalid", _addr, login);
     }
 
     Ok(())
@@ -885,6 +1023,8 @@ async fn handle_realm_list(
     let mut skip_buf = [0u8; 4];
     stream.read_exact(&mut skip_buf).await?;
 
+    tracing::debug!("[{}] RealmList request from '{}' (build={})", _addr, login, build);
+
     // Get account ID and GM level
     let sql = format!(
         "SELECT id, CAST(gmlevel AS SIGNED) AS gmlevel FROM account WHERE username = '{}'",
@@ -894,7 +1034,7 @@ async fn handle_realm_list(
     let (account_id, security_level) = match db.query_one(&sql).await? {
         Some(row) => (row.get_u32(0), row.get_u8(1)),
         None => {
-            tracing::error!("User {} not found in database for realm list", login);
+            tracing::error!("[{}] User '{}' not found for realm list", _addr, login);
             return Err(anyhow::anyhow!("Account not found"));
         }
     };
@@ -911,6 +1051,11 @@ async fn handle_realm_list(
         rl.realms().clone()
     };
 
+    tracing::debug!(
+        "[{}] Sending {} realm(s) to '{}' (account_id={} gmlevel={})",
+        _addr, realms_snapshot.len(), login, account_id, security_level
+    );
+
     let mut pkt = ByteBuffer::new();
     load_realm_list(&mut pkt, &realms_snapshot, account_id, security_level, build, account_security_level, db).await;
 
@@ -920,6 +1065,7 @@ async fn handle_realm_list(
     hdr.write_u16(pkt.size() as u16);
     hdr.append(pkt.contents());
 
+    tracing::trace!("[{}] RealmList response: {} bytes total", _addr, hdr.size());
     stream.write_all(hdr.contents()).await?;
     Ok(())
 }
@@ -949,6 +1095,7 @@ async fn load_realm_list(
             for (name, realm) in realms {
                 // Skip realms that require higher security
                 if security_level == 0 && realm.allowed_security_level > 0 {
+                    tracing::trace!("Skipping realm '{}' (requires security level {})", name, realm.allowed_security_level);
                     continue;
                 }
 
@@ -984,6 +1131,11 @@ async fn load_realm_list(
 
                 let category_id = get_realm_category_id(build, realm.timezone);
 
+                tracing::trace!(
+                    "Realm '{}': id={} addr='{}' flags=0x{:02X} chars={} population={:.1}",
+                    display_name, realm.id, realm.address, realm_flags, char_count, realm.population_level
+                );
+
                 pkt.write_u32(realm.icon as u32);
                 pkt.write_u8(realm_flags);
                 pkt.write_string(&display_name);
@@ -1003,6 +1155,7 @@ async fn load_realm_list(
 
             for (name, realm) in realms {
                 if security_level == 0 && realm.allowed_security_level > 0 {
+                    tracing::trace!("Skipping realm '{}' (requires security level {})", name, realm.allowed_security_level);
                     continue;
                 }
 
@@ -1031,6 +1184,11 @@ async fn load_realm_list(
                 }
 
                 let category_id = get_realm_category_id(build, realm.timezone);
+
+                tracing::trace!(
+                    "Realm '{}': id={} addr='{}' flags=0x{:02X} lock={} chars={} population={:.1}",
+                    name, realm.id, realm.address, realm_flags, lock, char_count, realm.population_level
+                );
 
                 pkt.write_u8(realm.icon);
                 pkt.write_u8(lock);
@@ -1072,9 +1230,12 @@ async fn get_char_count(db: &Database, realm_id: u32, account_id: u32) -> u8 {
 fn verify_version(build: u16, os: &str, a: &[u8], version_proof: &[u8], is_reconnect: bool) -> bool {
     let config = get_config().lock();
     if !config.get_bool_default("StrictVersionCheck", false) {
+        tracing::trace!("StrictVersionCheck disabled, skipping version verification");
         return true;
     }
     drop(config);
+
+    tracing::trace!("Verifying client version hash: build={} os='{}' reconnect={}", build, os, is_reconnect);
 
     let zeros = [0u8; 20];
     let version_hash: &[u8; 20];
@@ -1082,16 +1243,23 @@ fn verify_version(build: u16, os: &str, a: &[u8], version_proof: &[u8], is_recon
     if !is_reconnect {
         let build_info = match find_build_info(build) {
             Some(info) => info,
-            None => return false,
+            None => {
+                tracing::trace!("No build info for build {}", build);
+                return false;
+            }
         };
 
         let hash = match os {
             "Win" => &build_info.windows_hash,
             "OSX" => &build_info.mac_hash,
-            _ => return false,
+            _ => {
+                tracing::trace!("Unknown OS '{}' for version check", os);
+                return false;
+            }
         };
 
         if *hash == zeros {
+            tracing::trace!("No version hash stored server-side for build={} os='{}', accepting", build, os);
             return true; // not filled serverside
         }
 
@@ -1105,7 +1273,68 @@ fn verify_version(build: u16, os: &str, a: &[u8], version_proof: &[u8], is_recon
     sha.update_data_bytes(version_hash);
     sha.finalize();
 
-    sha.get_digest()[..] == version_proof[..20.min(version_proof.len())]
+    let result = sha.get_digest()[..] == version_proof[..20.min(version_proof.len())];
+    tracing::trace!("Version check result: {}", if result { "PASS" } else { "FAIL" });
+    result
+}
+
+/// Calculate the SHA pass hash for account creation.
+/// Matches C++ AccountMgr::CalculateShaPassHash:
+///   SHA1(UPPER(username) + ":" + UPPER(password))
+/// Returns the hex-encoded digest string.
+fn calculate_sha_pass_hash(username: &str, password: &str) -> String {
+    let mut sha = Sha1Hash::new();
+    sha.initialize();
+    sha.update_data(&username.to_uppercase());
+    sha.update_data(":");
+    sha.update_data(&password.to_uppercase());
+    sha.finalize();
+
+    // Hex-encode the digest
+    sha.get_digest()
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<String>()
+}
+
+/// Auto-create an account when it doesn't exist.
+/// The password is set to be the same as the username (development convenience).
+/// Uses the same SRP6 verifier generation as C++ AccountMgr::CreateAccount.
+async fn auto_create_account(
+    db: &Database,
+    login: &str,
+    safe_login: &str,
+) -> Result<(), anyhow::Error> {
+    // Password = username (standard dev convention)
+    let ri = calculate_sha_pass_hash(login, login);
+
+    let mut srp = SRP6::new();
+    if !srp.calculate_verifier_random(&ri) {
+        return Err(anyhow::anyhow!("Failed to generate SRP6 verifier"));
+    }
+
+    let s_hex = srp.get_salt().as_hex_str();
+    let v_hex = srp.get_verifier().as_hex_str();
+
+    let expansion = {
+        let config = get_config().lock();
+        config.get_int_default("AutoCreateAccounts.Expansion", 1) as u32
+    };
+
+    tracing::debug!(
+        "Auto-creating account '{}': expansion={} salt_len={} verifier_len={}",
+        login, expansion, s_hex.len(), v_hex.len()
+    );
+
+    let sql = format!(
+        "INSERT INTO account(username, v, s, expansion, joindate) \
+         VALUES('{}', '{}', '{}', '{}', NOW())",
+        safe_login, v_hex, s_hex, expansion
+    );
+
+    db.execute(&sql).await?;
+
+    Ok(())
 }
 
 /// Generate a TOTP token from a base32 key

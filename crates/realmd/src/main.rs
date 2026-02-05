@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 
 use mangos_shared::config::get_config;
 use mangos_shared::database::Database;
-use mangos_shared::log::initialize_logging;
+use mangos_shared::log::{initialize_logging, map_log_level};
 use mangos_shared::MINUTE;
 
 use realm_list::RealmList;
@@ -40,6 +40,11 @@ struct Args {
     /// Configuration file path
     #[arg(short, long, default_value = DEFAULT_CONFIG)]
     config: String,
+
+    /// Console log level override (0=Minimum, 1=Error, 2=Detail, 3=Full/Debug, 4=Trace)
+    /// Overrides the LogLevel setting from the config file.
+    #[arg(short, long, value_name = "LEVEL")]
+    log_level: Option<i32>,
 }
 
 /// Global stop signal
@@ -60,14 +65,30 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize logging
-    let log_dir = {
+    // LogLevel: console log level (0=Minimum/Error, 1=Warn, 2=Detail/Info, 3=Full/Debug, 4=Trace)
+    // LogFileLevel: file log level (same scale, defaults to LogLevel)
+    // CLI --log-level overrides config LogLevel
+    let (log_dir, console_level_str, file_level_str) = {
         let config = get_config().lock();
         let dir = config.get_string_default("LogsDir", "");
-        if dir.is_empty() { None } else { Some(dir) }
+        let log_dir = if dir.is_empty() { None } else { Some(dir) };
+
+        let console_level_int = args.log_level.unwrap_or_else(|| config.get_int_default("LogLevel", 2));
+        let file_level_int = config.get_int_default("LogFileLevel", console_level_int);
+
+        let console_str = map_log_level(console_level_int).to_string();
+        let file_str = map_log_level(file_level_int).to_string();
+
+        (log_dir, console_str, file_str)
     };
-    initialize_logging(log_dir.as_deref(), "info");
+    initialize_logging(
+        log_dir.as_deref(),
+        &console_level_str,
+        Some(&file_level_str),
+    );
 
     // Print banner
+    tracing::debug!("Console log level: {} | File log level: {}", console_level_str, file_level_str);
     tracing::info!("CMaNGOS TBC Auth Server (Rust) v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("");
     tracing::info!("       _____     __  __       _   _  _____  ____   _____ ");

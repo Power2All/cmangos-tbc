@@ -228,15 +228,15 @@ impl SRP6 {
     }
 
     /// Verify client proof (M)
-    /// Returns true if the client's M matches our computed M
-    /// Note: The C++ code returns false when memcmp == 0 (match found),
-    /// meaning "not failed" = success. The logic is inverted from what you'd expect.
+    /// Returns true if the client's M matches our computed M (password correct)
+    /// Returns false if they don't match (wrong password)
+    ///
+    /// Note: The C++ Proof() returns memcmp() result which is 0 (falsy) on match,
+    /// so C++ callers use `if (!srp.Proof(...))` for the success branch.
+    /// Our Rust version uses idiomatic `true` = match, so callers use
+    /// `if !srp.proof(...)` for the failure branch.
     pub fn proof(&self, client_m: &[u8]) -> bool {
         let our_m = self.m.as_byte_array(client_m.len());
-        // C++ returns !memcmp(...) == false when they match, but the actual semantics
-        // in the calling code treat return=false as "proof succeeded" (confusing but correct)
-        // In _HandleLogonProof: if (!self->srp.Proof(lp->M1, 20)) means "if proof succeeded"
-        // So Proof returns false on success in C++. We match that behavior.
         our_m[..client_m.len()] == client_m[..client_m.len()]
     }
 

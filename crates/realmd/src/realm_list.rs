@@ -176,6 +176,7 @@ impl RealmList {
 
     /// Initialize the realm list with periodic update interval
     pub async fn initialize(&mut self, update_interval: u32, db: &Database) {
+        tracing::debug!("Initializing realm list (update interval: {}s)", update_interval);
         self.update_interval = update_interval;
         self.update_realms(db, true).await;
     }
@@ -195,6 +196,7 @@ impl RealmList {
             return;
         }
 
+        tracing::debug!("Realm list update interval expired, refreshing from database");
         self.next_update_time = now + self.update_interval as i64;
         self.realms.write().clear();
         self.update_realms(db, false).await;
@@ -214,6 +216,7 @@ impl RealmList {
 
         match db.query(sql).await {
             Ok(rows) => {
+                tracing::debug!("Realm query returned {} row(s)", rows.len());
                 for row in &rows {
                     let id: u32 = row.get_u32(0);
                     let name: String = row.get_string(1);
@@ -288,6 +291,13 @@ impl RealmList {
                     };
 
                     let full_address = format!("{}:{}", address, port);
+
+                    tracing::debug!(
+                        "Realm '{}': id={} address='{}' icon={} flags=0x{:02X} timezone={} \
+                         security={} population={:.1} builds='{}'",
+                        name, id, full_address, icon, realm_flags, timezone,
+                        security_level, population, builds_str
+                    );
 
                     let realm = Realm {
                         id,

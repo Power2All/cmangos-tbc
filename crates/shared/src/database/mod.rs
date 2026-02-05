@@ -202,7 +202,21 @@ pub trait FieldExt {
 
 impl FieldExt for AnyRow {
     fn get_string(&self, index: usize) -> String {
-        self.try_get::<String, _>(index).unwrap_or_default()
+        // The SQLx Any driver maps MySQL TEXT/LONGTEXT/BLOB columns inconsistently.
+        // Try multiple Rust types in order of likelihood:
+        //   1. String - works for VARCHAR, CHAR
+        //   2. &str   - works for some text types
+        //   3. Vec<u8> - works for BLOB/LONGTEXT that the Any driver misidentifies
+        self.try_get::<String, _>(index)
+            .or_else(|_| self.try_get::<&str, _>(index).map(|s| s.to_string()))
+            .or_else(|_| {
+                self.try_get::<Vec<u8>, _>(index)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .unwrap_or_else(|e| {
+                tracing::trace!("get_string({}): all decode attempts failed: {}", index, e);
+                String::new()
+            })
     }
 
     fn get_u8(&self, index: usize) -> u8 {
