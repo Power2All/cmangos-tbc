@@ -165,7 +165,7 @@ struct VmapContext {
     failed_paths: HashSet<String>,
 }
 
-pub fn run_vmap_extract(args: VmapExtractArgs) -> anyhow::Result<()> {
+pub fn run_vmap_extract(args: VmapExtractArgs, _threads: usize) -> anyhow::Result<()> {
     let data_path = Path::new(&args.data_path);
     if !data_path.exists() {
         anyhow::bail!("Data path does not exist: {}", args.data_path);
@@ -305,8 +305,8 @@ fn fixnamen(name: &mut [u8]) {
         }
     }
 
-    for i in len - 3..len {
-        name[i] = name[i].to_ascii_lowercase();
+    for c in &mut name[len - 3..len] {
+        *c = c.to_ascii_lowercase();
     }
 }
 
@@ -329,10 +329,10 @@ fn normalize_filename(name: &str) -> String {
 }
 
 fn ensure_parent(path: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     Ok(())
 }
@@ -576,11 +576,11 @@ fn extract_single_model(
     }
 
     let mut path = orig_path.to_string();
-    if let Some(ext) = get_extension(get_plain_name(&path)) {
-        if ext.eq_ignore_ascii_case("mdx") || ext.eq_ignore_ascii_case("mdl") {
-            path.truncate(path.len().saturating_sub(2));
-            path.push('2');
-        }
+    if let Some(ext) = get_extension(get_plain_name(&path))
+        && (ext.eq_ignore_ascii_case("mdx") || ext.eq_ignore_ascii_case("mdl"))
+    {
+        path.truncate(path.len().saturating_sub(2));
+        path.push('2');
     }
 
     let fixed_name = get_plain_name(&path).to_string();
@@ -699,7 +699,7 @@ fn extract_wmos(context: &mut VmapContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn extract_single_wmo(context: &mut VmapContext, fname: &mut String) -> anyhow::Result<bool> {
+fn extract_single_wmo(context: &mut VmapContext, fname: &mut str) -> anyhow::Result<bool> {
     let plain_name = get_plain_name(fname);
     let fixed = normalize_filename(plain_name);
 
@@ -733,7 +733,7 @@ fn extract_single_wmo(context: &mut VmapContext, fname: &mut String) -> anyhow::
     let mut real_groups = root.n_groups;
 
     for idx in 0..root.n_groups {
-        let mut group_name = fname.clone();
+        let mut group_name = fname.to_owned();
         if group_name.len() < 4 {
             continue;
         }
@@ -856,10 +856,10 @@ impl WmoRoot {
                         }
 
                         let doodad_name_index = offset as u32;
-                        if let Some(fixed_name) = extract_single_model(context, &path)? {
-                            if !fixed_name.is_empty() {
-                                root.valid_doodad_names.insert(doodad_name_index);
-                            }
+                        if let Some(fixed_name) = extract_single_model(context, &path)?
+                            && !fixed_name.is_empty()
+                        {
+                            root.valid_doodad_names.insert(doodad_name_index);
                         }
 
                         offset = end_pos + 1;
@@ -1047,12 +1047,11 @@ impl WmoGroup {
         if (self.mogp_flags & 0x4000000) != 0 {
             return true;
         }
-        if self.group_name >= 0 && (self.group_name as usize) < root.group_names.len() {
-            if let Some(name) = read_cstring(&root.group_names, self.group_name as usize) {
-                if name == "antiportal" {
-                    return true;
-                }
-            }
+        if self.group_name >= 0 && (self.group_name as usize) < root.group_names.len()
+            && let Some(name) = read_cstring(&root.group_names, self.group_name as usize)
+            && name == "antiportal"
+        {
+            return true;
         }
         false
     }
@@ -1114,7 +1113,7 @@ impl WmoGroup {
 
             n_col_triangles = n_triangles;
         } else {
-            let n_triangles = (self.mopy.len() / 2) as usize;
+            let n_triangles = self.mopy.len() / 2;
             let n_vertices = self.movt.len() / 3;
             let mut movi_ex = vec![0u16; n_triangles * 3];
             let mut index_renum = vec![-1i32; n_vertices];
@@ -1143,17 +1142,17 @@ impl WmoGroup {
                 }
             }
 
-            for i in 0..(n_col_triangles as usize * 3) {
-                let idx = movi_ex[i] as usize;
-                movi_ex[i] = index_renum[idx] as u16;
+            for val in movi_ex.iter_mut().take(n_col_triangles as usize * 3) {
+                let idx = *val as usize;
+                *val = index_renum[idx] as u16;
             }
 
             out.write_all(b"INDX")?;
             let wsize = 4 + 2 * n_col_triangles * 3;
             out.write_u32::<LittleEndian>(wsize)?;
             out.write_u32::<LittleEndian>(n_col_triangles * 3)?;
-            for i in 0..(n_col_triangles as usize * 3) {
-                out.write_u16::<LittleEndian>(movi_ex[i])?;
+            for val in movi_ex.iter().take(n_col_triangles as usize * 3) {
+                out.write_u16::<LittleEndian>(*val)?;
             }
 
             out.write_all(b"VERT")?;
@@ -1161,8 +1160,8 @@ impl WmoGroup {
             out.write_u32::<LittleEndian>(wsize)?;
             out.write_u32::<LittleEndian>(n_col_vertices as u32)?;
 
-            for i in 0..n_vertices {
-                if index_renum[i] >= 0 {
+            for (i, &renum) in index_renum.iter().enumerate().take(n_vertices) {
+                if renum >= 0 {
                     let base = i * 3;
                     out.write_f32::<LittleEndian>(self.movt[base])?;
                     out.write_f32::<LittleEndian>(self.movt[base + 1])?;
@@ -1557,8 +1556,8 @@ fn write_wmo_instance(
 
     let mut position = inst.position;
     if position.x == 0.0 && position.z == 0.0 {
-        position.x = 533.33333 * 32.0;
-        position.z = 533.33333 * 32.0;
+        position.x = 533.333_3 * 32.0;
+        position.z = 533.333_3 * 32.0;
     }
 
     let position = fix_coords(position);
@@ -1759,11 +1758,9 @@ fn extract_gameobject_models(context: &mut VmapContext) -> anyhow::Result<()> {
             result = extract_single_wmo(context, &mut temp)?;
         } else if ext.eq_ignore_ascii_case("mdl") {
             continue;
-        } else {
-            if let Some(converted) = extract_single_model(context, &fixed_path)? {
-                name = converted;
-                result = true;
-            }
+        } else if let Some(converted) = extract_single_model(context, &fixed_path)? {
+            name = converted;
+            result = true;
         }
 
         if result {

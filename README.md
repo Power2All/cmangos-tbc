@@ -138,6 +138,6 @@ Depends on what operating system you run this, but as example I show the Windows
 Here is an example to extract everything:
 `cd <WoW TBC Client>`
 `extractors.exe map-dbc -o work`
-`extractors.exe vmap-extract -d /Data -o work -l`
+`extractors.exe vmap-extract -d Data/ -o work -l`
 `extractors.exe vmap-assemble work/Buildings work/vmaps`
 `extractors.exe move-map-gen --workdir work`

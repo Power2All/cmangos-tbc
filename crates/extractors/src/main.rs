@@ -78,6 +78,10 @@ struct MapDbcArgs {
     /// Disable clamping of minimum height
     #[arg(long = "disable-min-height-limit", default_value_t = false)]
     disable_min_height_limit: bool,
+
+    /// Number of threads to use
+    #[arg(long = "threads")]
+    threads: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -97,6 +101,10 @@ struct VmapExtractArgs {
     /// Small size (default, smaller output)
     #[arg(short = 's', long = "small")]
     small: bool,
+
+    /// Number of threads to use
+    #[arg(long = "threads")]
+    threads: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -106,6 +114,10 @@ struct VmapAssembleArgs {
 
     /// Output vmap directory
     output_dir: String,
+
+    /// Number of threads to use
+    #[arg(long = "threads")]
+    threads: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -209,16 +221,26 @@ fn ensure_dir(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn resolve_threads(threads: Option<usize>) -> usize {
+    threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
 fn run_map_dbc(args: MapDbcArgs) -> anyhow::Result<()> {
-    map_dbc::run_map_dbc(args)
+    let threads = resolve_threads(args.threads);
+    tracing::info!("MapDbc: threads={}", threads);
+    map_dbc::run_map_dbc(args, threads)
 }
 
 fn run_vmap_extract(args: VmapExtractArgs) -> anyhow::Result<()> {
-    vmap_extract::run_vmap_extract(args)
+    let threads = resolve_threads(args.threads);
+    tracing::info!("VmapExtract: threads={}", threads);
+    vmap_extract::run_vmap_extract(args, threads)
 }
 
 fn run_vmap_assemble(args: VmapAssembleArgs) -> anyhow::Result<()> {
-    vmap_assemble::run_vmap_assemble(args)
+    let threads = resolve_threads(args.threads);
+    tracing::info!("VmapAssemble: threads={}", threads);
+    vmap_assemble::run_vmap_assemble(args, threads)
 }
 
 fn run_movemap_gen(args: MoveMapGenArgs) -> anyhow::Result<()> {

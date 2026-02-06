@@ -23,7 +23,7 @@ use tracing::{debug, error, info, warn};
 const BASE_UNIT_DIM: f32 = 0.266_666_6;
 
 /// Grid size in world units (one ADT tile)
-const GRID_SIZE: f32 = 533.333_33;
+const GRID_SIZE: f32 = 533.333_3;
 
 /// Grid part size (one V8 cell)
 const GRID_PART_SIZE: f32 = GRID_SIZE / V8_SIZE as f32;
@@ -404,11 +404,11 @@ impl TerrainBuilder {
                     {
                         // dummy vert
                         mesh_data.liquid_verts.push(
-                            (xoffset + col as f32 * GRID_PART_SIZE) * -1.0,
+                            -(xoffset + col as f32 * GRID_PART_SIZE),
                         );
                         mesh_data.liquid_verts.push(INVALID_MAP_LIQ_HEIGHT);
                         mesh_data.liquid_verts.push(
-                            (yoffset + row as f32 * GRID_PART_SIZE) * -1.0,
+                            -(yoffset + row as f32 * GRID_PART_SIZE),
                         );
                         continue;
                     }
@@ -424,11 +424,11 @@ impl TerrainBuilder {
                     let row = i / V9_SIZE;
                     let col = i % V9_SIZE;
                     mesh_data.liquid_verts.push(
-                        (xoffset + col as f32 * GRID_PART_SIZE) * -1.0,
+                        -(xoffset + col as f32 * GRID_PART_SIZE),
                     );
                     mesh_data.liquid_verts.push(liq_liquid_level);
                     mesh_data.liquid_verts.push(
-                        (yoffset + row as f32 * GRID_PART_SIZE) * -1.0,
+                        -(yoffset + row as f32 * GRID_PART_SIZE),
                     );
                 }
             }
@@ -483,9 +483,7 @@ impl TerrainBuilder {
                         != 0
                     {
                         liquid_type_val = NAV_AREA_WATER;
-                    } else if (liquid_type_val & MAP_LIQUID_TYPE_MAGMA) != 0 {
-                        liquid_type_val = NAV_AREA_MAGMA_SLIME;
-                    } else if (liquid_type_val & MAP_LIQUID_TYPE_SLIME) != 0 {
+                    } else if (liquid_type_val & (MAP_LIQUID_TYPE_MAGMA | MAP_LIQUID_TYPE_SLIME)) != 0 {
                         liquid_type_val = NAV_AREA_MAGMA_SLIME;
                     } else {
                         use_liquid = false;
@@ -818,7 +816,7 @@ impl TerrainBuilder {
         };
 
         let reader = BufReader::new(file);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             // Format: mapID tileX,tileY (p0x p0y p0z) (p1x p1y p1z) size
             // We need to parse this carefully
@@ -844,8 +842,7 @@ impl TerrainBuilder {
 
             // Remove parentheses and parse coordinates
             let clean_line = line
-                .replace('(', "")
-                .replace(')', "");
+                .replace(['(', ')'], "");
             let clean_parts: Vec<&str> = clean_line.split_whitespace().collect();
             if clean_parts.len() < 10 {
                 continue;
@@ -1018,6 +1015,7 @@ struct MapBuilder {
 }
 
 impl MapBuilder {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config_input_path: Option<&Path>,
         threads: usize,
@@ -1068,31 +1066,29 @@ impl MapBuilder {
         let mut count = 0u32;
 
         // Scan maps/ directory
-        if let Ok(entries) = fs::read_dir(&maps_dir) {
+        if let Ok(entries) = fs::read_dir(maps_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.len() >= 3 {
-                    if let Ok(map_id) = name[..3].parse::<u32>() {
-                        if !self.tiles.contains_key(&map_id) {
-                            self.tiles.insert(map_id, BTreeSet::new());
-                            count += 1;
-                        }
-                    }
+                if name.len() >= 3
+                    && let Ok(map_id) = name[..3].parse::<u32>()
+                    && let std::collections::btree_map::Entry::Vacant(e) = self.tiles.entry(map_id)
+                {
+                    e.insert(BTreeSet::new());
+                    count += 1;
                 }
             }
         }
 
         // Scan vmaps/ for .vmtree files
-        if let Ok(entries) = fs::read_dir(&vmaps_dir) {
+        if let Ok(entries) = fs::read_dir(vmaps_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".vmtree") && name.len() >= 3 {
-                    if let Ok(map_id) = name[..3].parse::<u32>() {
-                        if !self.tiles.contains_key(&map_id) {
-                            self.tiles.insert(map_id, BTreeSet::new());
-                            count += 1;
-                        }
-                    }
+                if name.ends_with(".vmtree") && name.len() >= 3
+                    && let Ok(map_id) = name[..3].parse::<u32>()
+                    && let std::collections::btree_map::Entry::Vacant(e) = self.tiles.entry(map_id)
+                {
+                    e.insert(BTreeSet::new());
+                    count += 1;
                 }
             }
         }
@@ -1104,7 +1100,7 @@ impl MapBuilder {
         let map_ids: Vec<u32> = self.tiles.keys().cloned().collect();
         for map_id in map_ids {
             // Scan vmaps for .vmtile files
-            if let Ok(entries) = fs::read_dir(&vmaps_dir) {
+            if let Ok(entries) = fs::read_dir(vmaps_dir) {
                 let filter = format!("{:03}", map_id);
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -1124,7 +1120,7 @@ impl MapBuilder {
             }
 
             // Scan maps for .map files
-            if let Ok(entries) = fs::read_dir(&maps_dir) {
+            if let Ok(entries) = fs::read_dir(maps_dir) {
                 let filter = format!("{:03}", map_id);
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
@@ -1487,6 +1483,7 @@ fn write_nav_mesh_params(path: &Path, params: &NavMeshParams) -> anyhow::Result<
 // Tile building worker (called per-tile, potentially from thread pool)
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn build_tile_worker(
     map_id: u32,
     tile_x: u32,
@@ -1550,6 +1547,7 @@ fn build_tile_worker(
 }
 
 /// Build the actual navmesh tile using Recast pipeline
+#[allow(clippy::too_many_arguments)]
 fn build_move_map_tile(
     map_id: u32,
     tile_x: u32,
@@ -1624,6 +1622,7 @@ fn build_move_map_tile(
 
 #[cfg(feature = "recast")]
 /// Core Recast/Detour tile building - requires unsafe for FFI
+#[allow(clippy::too_many_arguments)]
 unsafe fn build_move_map_tile_unsafe(
     tile_string: &str,
     map_id: u32,
@@ -1767,19 +1766,22 @@ unsafe fn build_move_map_tile_unsafe(
     rc_get_poly_mesh_detail_data(merged_dmesh, &mut dm_data);
 
     // Setup dtNavMeshCreateParams
-    let mut params = DtNavMeshCreateParamsC::default();
-    params.verts = pm_data.verts;
-    params.vert_count = pm_data.nverts;
-    params.polys = pm_data.polys;
-    params.poly_areas = pm_data.areas;
-    params.poly_flags = pm_data.flags;
-    params.poly_count = pm_data.npolys;
-    params.nvp = pm_data.nvp;
-    params.detail_meshes = dm_data.meshes;
-    params.detail_verts = dm_data.verts;
-    params.detail_verts_count = dm_data.nverts;
-    params.detail_tris = dm_data.tris;
-    params.detail_tri_count = dm_data.ntris;
+    #[allow(clippy::field_reassign_with_default)]
+    let mut params = DtNavMeshCreateParamsC {
+        verts: pm_data.verts,
+        vert_count: pm_data.nverts,
+        polys: pm_data.polys,
+        poly_areas: pm_data.areas,
+        poly_flags: pm_data.flags,
+        poly_count: pm_data.npolys,
+        nvp: pm_data.nvp,
+        detail_meshes: dm_data.meshes,
+        detail_verts: dm_data.verts,
+        detail_verts_count: dm_data.nverts,
+        detail_tris: dm_data.tris,
+        detail_tri_count: dm_data.ntris,
+        ..Default::default()
+    };
 
     // Off-mesh connections
     if !mesh_data.off_mesh_connections.is_empty() {
@@ -1885,6 +1887,7 @@ unsafe fn build_move_map_tile_unsafe(
 
 #[cfg(feature = "recast")]
 /// Build a common tile using the Recast pipeline (unsafe FFI)
+#[allow(clippy::too_many_arguments)]
 unsafe fn build_common_tile_recast(
     ctx: recast_ffi::rc_context_t,
     tile_string: &str,
@@ -2090,8 +2093,8 @@ fn rc_mod_almost_unwalkable_triangles(
 ) {
     let walkable_thr = (walkable_slope_angle / 180.0 * std::f32::consts::PI).cos();
 
-    for i in 0..tri_count as usize {
-        if (areas[i] & 0x3F) != 0 {
+    for (i, area) in areas.iter_mut().enumerate().take(tri_count as usize) {
+        if (*area & 0x3F) != 0 {
             // RC_WALKABLE_AREA check
             unsafe {
                 let tri = tris.add(i * 3);
@@ -2131,7 +2134,7 @@ fn rc_mod_almost_unwalkable_triangles(
                 }
 
                 if norm[1] <= walkable_thr {
-                    areas[i] = NAV_AREA_GROUND_STEEP;
+                    *area = NAV_AREA_GROUND_STEEP;
                 }
             }
         }
@@ -2178,13 +2181,13 @@ fn get_loop_vars(portion: Spot) -> (usize, usize, usize) {
 fn get_height_coord(index: usize, grid: Grid, x_offset: f32, y_offset: f32, v: &[f32]) -> [f32; 3] {
     match grid {
         Grid::V9 => [
-            (x_offset + (index % V9_SIZE) as f32 * GRID_PART_SIZE) * -1.0,
-            (y_offset + (index / V9_SIZE) as f32 * GRID_PART_SIZE) * -1.0,
+            -(x_offset + (index % V9_SIZE) as f32 * GRID_PART_SIZE),
+            -(y_offset + (index / V9_SIZE) as f32 * GRID_PART_SIZE),
             v[index],
         ],
         Grid::V8 => [
-            (x_offset + (index % V8_SIZE) as f32 * GRID_PART_SIZE + GRID_PART_SIZE / 2.0) * -1.0,
-            (y_offset + (index / V8_SIZE) as f32 * GRID_PART_SIZE + GRID_PART_SIZE / 2.0) * -1.0,
+            -(x_offset + (index % V8_SIZE) as f32 * GRID_PART_SIZE + GRID_PART_SIZE / 2.0),
+            -(y_offset + (index / V8_SIZE) as f32 * GRID_PART_SIZE + GRID_PART_SIZE / 2.0),
             v[index],
         ],
     }
@@ -2192,8 +2195,8 @@ fn get_height_coord(index: usize, grid: Grid, x_offset: f32, y_offset: f32, v: &
 
 fn get_liquid_coord(index: usize, index2: usize, x_offset: f32, y_offset: f32, v: &[f32]) -> [f32; 3] {
     [
-        (x_offset + (index % V9_SIZE) as f32 * GRID_PART_SIZE) * -1.0,
-        (y_offset + (index / V9_SIZE) as f32 * GRID_PART_SIZE) * -1.0,
+        -(x_offset + (index % V9_SIZE) as f32 * GRID_PART_SIZE),
+        -(y_offset + (index / V9_SIZE) as f32 * GRID_PART_SIZE),
         v[index2],
     ]
 }
@@ -2316,7 +2319,7 @@ fn get_tile_bounds(tile_x: u32, tile_y: u32, verts: &[f32], vert_count: usize) -
     (bmin, bmax)
 }
 
-fn clean_vertices(verts: &mut Vec<f32>, tris: &mut Vec<i32>) {
+fn clean_vertices(verts: &mut Vec<f32>, tris: &mut [i32]) {
     if tris.is_empty() {
         return;
     }
@@ -2330,16 +2333,14 @@ fn clean_vertices(verts: &mut Vec<f32>, tris: &mut Vec<i32>) {
 
     // Build clean vertex list
     let mut clean_verts: Vec<f32> = Vec::new();
-    let mut count = 0i32;
-    for (index, new_idx) in vert_map.iter_mut() {
-        let idx = *index as usize;
-        *new_idx = count;
+    for (count, (_index, new_idx)) in vert_map.iter_mut().enumerate() {
+        let idx = *_index as usize;
+        *new_idx = count as i32;
         if idx * 3 + 2 < verts.len() {
             clean_verts.push(verts[idx * 3]);
             clean_verts.push(verts[idx * 3 + 1]);
             clean_verts.push(verts[idx * 3 + 2]);
         }
-        count += 1;
     }
 
     *verts = clean_verts;
@@ -2362,10 +2363,10 @@ fn get_tile_config(
 
     if let Some(json) = config_json {
         let key = map_id.to_string();
-        if let Some(map_config) = json.get(&key) {
-            if let Ok(overrides) = serde_json::from_value::<MmapConfig>(map_config.clone()) {
-                config = overrides;
-            }
+        if let Some(map_config) = json.get(&key)
+            && let Ok(overrides) = serde_json::from_value::<MmapConfig>(map_config.clone())
+        {
+            config = overrides;
         }
     }
 

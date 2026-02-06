@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use byteorder::{LittleEndian, WriteBytesExt};
+use rayon::prelude::*;
 use wow_adt::chunks::mh2o::VertexDataArray;
 use wow_adt::{parse_adt, ParsedAdt};
 use wow_wdt::{version::WowVersion, WdtReader};
@@ -91,7 +92,7 @@ fn ensure_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn run_map_dbc(args: MapDbcArgs) -> anyhow::Result<()> {
+pub fn run_map_dbc(args: MapDbcArgs, threads: usize) -> anyhow::Result<()> {
     if args.extract_mask == 0 || args.extract_mask > (EXTRACT_MAP | EXTRACT_DBC | EXTRACT_CAMERA) {
         anyhow::bail!("Invalid extract mask: {}", args.extract_mask);
     }
@@ -157,7 +158,7 @@ pub fn run_map_dbc(args: MapDbcArgs) -> anyhow::Result<()> {
         let mut mpq = MpqManager::new();
         load_locale_mpqs(&mut mpq, input_path, locale)?;
         load_common_mpqs(&mut mpq, input_path)?;
-        extract_maps(&mut mpq, output_path, &config)?;
+        extract_maps(&mut mpq, output_path, &config, threads)?;
     }
 
     Ok(())
@@ -307,8 +308,8 @@ fn extract_camera_files(
     tracing::info!("Extracted {} camera files", count);
     Ok(())
 }
-fn extract_maps(mpq: &mut MpqManager, output_path: &Path, config: &ExtractConfig) -> anyhow::Result<()> {
-    tracing::info!("Extracting maps...");
+fn extract_maps(mpq: &mut MpqManager, output_path: &Path, config: &ExtractConfig, threads: usize) -> anyhow::Result<()> {
+    tracing::info!("Extracting maps using {} threads...", threads);
 
     let map_ids = read_map_dbc(mpq)?;
     let (areas, max_area_id) = read_area_table_dbc(mpq)?;
@@ -316,6 +317,10 @@ fn extract_maps(mpq: &mut MpqManager, output_path: &Path, config: &ExtractConfig
 
     let maps_path = output_path.join("maps");
     ensure_dir(&maps_path)?;
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build();
 
     for (index, map) in map_ids.iter().enumerate() {
         tracing::info!("Extract {} ({}/{})", map.name, index + 1, map_ids.len());
@@ -337,6 +342,8 @@ fn extract_maps(mpq: &mut MpqManager, output_path: &Path, config: &ExtractConfig
             }
         };
 
+        // Phase 1 (sequential): Read all ADT tiles from MPQ
+        let mut adt_tiles: Vec<(usize, usize, Vec<u8>)> = Vec::new();
         for y in 0..WDT_MAP_SIZE {
             for x in 0..WDT_MAP_SIZE {
                 let Some(tile) = wdt.get_tile(x, y) else {
@@ -347,19 +354,36 @@ fn extract_maps(mpq: &mut MpqManager, output_path: &Path, config: &ExtractConfig
                 }
 
                 let adt_name = format!("World\\Maps\\{}\\{}_{}_{}.adt", map.name, map.name, x, y);
-                let Some(adt_bytes) = mpq.open_file(&adt_name) else {
-                    continue;
-                };
+                if let Some(adt_bytes) = mpq.open_file(&adt_name) {
+                    adt_tiles.push((x, y, adt_bytes));
+                }
+            }
+        }
 
-                let out_file = maps_path.join(format!("{:03}{:02}{:02}.map", map.id, y, x));
-                convert_adt(
-                    &adt_bytes,
-                    &out_file,
-                    &areas,
-                    max_area_id,
-                    &liquid_types,
-                    config,
-                )?;
+        if adt_tiles.is_empty() {
+            continue;
+        }
+
+        // Phase 2 (parallel): Convert and write tiles using rayon
+        let map_id = map.id;
+        let convert_tile = |&(x, y, ref adt_bytes): &(usize, usize, Vec<u8>)| -> anyhow::Result<()> {
+            let out_file = maps_path.join(format!("{:03}{:02}{:02}.map", map_id, y, x));
+            convert_adt(adt_bytes, &out_file, &areas, max_area_id, &liquid_types, config)
+        };
+
+        match &pool {
+            Ok(pool) => {
+                let results: Vec<anyhow::Result<()>> = pool.install(|| {
+                    adt_tiles.par_iter().map(convert_tile).collect()
+                });
+                for result in results {
+                    result?;
+                }
+            }
+            Err(_) => {
+                for tile in &adt_tiles {
+                    convert_tile(tile)?;
+                }
             }
         }
     }

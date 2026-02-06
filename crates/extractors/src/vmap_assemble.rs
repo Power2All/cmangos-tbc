@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use rayon::prelude::*;
 
 use crate::VmapAssembleArgs;
 
@@ -16,7 +17,7 @@ const MOD_M2: u32 = 1;
 const MOD_WORLDSPAWN: u32 = 1 << 1;
 const MOD_HAS_BOUND: u32 = 1 << 2;
 
-const WORLDSPAWN_OFFSET: f32 = 533.33333 * 32.0;
+const WORLDSPAWN_OFFSET: f32 = 533.333_3 * 32.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Vec3 {
@@ -186,7 +187,7 @@ impl WmoLiquid {
         2 * std::mem::size_of::<u32>() as u32
             + std::mem::size_of::<Vec3>() as u32
             + height_size * std::mem::size_of::<f32>() as u32
-            + (self.tiles_x * self.tiles_y) as u32
+            + (self.tiles_x * self.tiles_y)
     }
 }
 
@@ -213,7 +214,7 @@ struct MapSpawns {
     tile_entries: Vec<(u32, u32)>,
 }
 
-pub fn run_vmap_assemble(args: VmapAssembleArgs) -> anyhow::Result<()> {
+pub fn run_vmap_assemble(args: VmapAssembleArgs, threads: usize) -> anyhow::Result<()> {
     tracing::info!(
         "VMap assembler: raw='{}' output='{}'",
         args.raw_data_dir,
@@ -259,11 +260,11 @@ pub fn run_vmap_assemble(args: VmapAssembleArgs) -> anyhow::Result<()> {
                     missing.push(*spawn_id);
                     continue;
                 }
-            } else if (spawn.flags & MOD_WORLDSPAWN) != 0 {
-                if let Some(bound) = spawn.bound {
-                    let offset = Vec3::new(WORLDSPAWN_OFFSET, WORLDSPAWN_OFFSET, 0.0);
-                    spawn.bound = Some(bound.add(offset));
-                }
+            } else if (spawn.flags & MOD_WORLDSPAWN) != 0
+                && let Some(bound) = spawn.bound
+            {
+                let offset = Vec3::new(WORLDSPAWN_OFFSET, WORLDSPAWN_OFFSET, 0.0);
+                spawn.bound = Some(bound.add(offset));
             }
             spawned_model_files.insert(spawn.name.clone());
         }
@@ -282,11 +283,33 @@ pub fn run_vmap_assemble(args: VmapAssembleArgs) -> anyhow::Result<()> {
 
     export_gameobject_models(raw_dir, &output_dir, &mut spawned_model_files)?;
 
-    tracing::info!("Converting Model Files");
-    for model in spawned_model_files {
-        tracing::info!("Converting {}", model);
-        if let Err(err) = convert_raw_file(raw_dir, &output_dir, &model) {
-            tracing::warn!("Skipping model {} due to error: {}", model, err);
+    let model_list: Vec<String> = spawned_model_files.into_iter().collect();
+    let model_count = model_list.len();
+    tracing::info!("Converting {} Model Files using {} threads", model_count, threads);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build();
+
+    match pool {
+        Ok(pool) => {
+            pool.install(|| {
+                model_list.par_iter().for_each(|model| {
+                    tracing::info!("Converting {}", model);
+                    if let Err(err) = convert_raw_file(raw_dir, &output_dir, model) {
+                        tracing::warn!("Skipping model {} due to error: {}", model, err);
+                    }
+                });
+            });
+        }
+        Err(e) => {
+            tracing::warn!("Failed to create thread pool: {}, using single-threaded", e);
+            for model in &model_list {
+                tracing::info!("Converting {}", model);
+                if let Err(err) = convert_raw_file(raw_dir, &output_dir, model) {
+                    tracing::warn!("Skipping model {} due to error: {}", model, err);
+                }
+            }
         }
     }
 
@@ -382,7 +405,7 @@ fn write_map_files(output_dir: &Path, map_id: u32, spawns: &MapSpawns) -> anyhow
                 spawns
                     .unique_entries
                     .get(&e.1)
-                    .map_or(false, |s| (s.flags & MOD_WORLDSPAWN) == 0)
+                    .is_some_and(|s| (s.flags & MOD_WORLDSPAWN) == 0)
             })
             .collect();
         if non_worldspawn.is_empty() {
@@ -536,10 +559,10 @@ fn read_raw_model(path: &Path) -> anyhow::Result<RawModel> {
 
     let mut last_err = None;
     for header_len in [8usize, 7usize] {
-        if header_len == 8 {
-            if data.len() < 8 || data[7] != 0 {
-                continue;
-            }
+        if header_len == 8
+            && (data.len() < 8 || data[7] != 0)
+        {
+            continue;
         }
         match parse_raw_model_with_header(&data, header_len) {
             Ok(model) => return Ok(model),
@@ -767,10 +790,7 @@ struct Bih {
 
 impl Bih {
     fn new_empty() -> Self {
-        let mut tree = Vec::with_capacity(3);
-        tree.push(3u32 << 30); // dummy leaf
-        tree.push(0);
-        tree.push(0);
+        let tree = vec![3u32 << 30, 0, 0]; // dummy leaf
         Self {
             bounds: AaBox::default(),
             tree,
