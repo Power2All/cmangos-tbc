@@ -129,3 +129,15 @@ With navmesh generation (needs C++ compiler):
 
 Just the extractors binary with recast:
 `cargo build --release -p extractors --features recast`
+
+#### Extractors Run Commands
+
+Copy the extractors binary to the folder where World of Warcraft game resides in, and the following commands should work.
+Depends on what operating system you run this, but as example I show the Windows commands:
+
+Here is an example to extract everything:
+`cd <WoW TBC Client>`
+`extractors.exe map-dbc -o work`
+`extractors.exe vmap-extract -d /Data -o work -l`
+`extractors.exe vmap-assemble work/Buildings work/vmaps`
+`extractors.exe move-map-gen --workdir work`

@@ -157,14 +157,16 @@ struct VmapLiquidData {
 
 struct TerrainBuilder {
     skip_liquid: bool,
-    workdir: PathBuf,
+    maps_dir: PathBuf,
+    vmaps_dir: PathBuf,
 }
 
 impl TerrainBuilder {
-    fn new(skip_liquid: bool, workdir: &Path) -> Self {
+    fn new(skip_liquid: bool, maps_dir: &Path, vmaps_dir: &Path) -> Self {
         Self {
             skip_liquid,
-            workdir: workdir.to_path_buf(),
+            maps_dir: maps_dir.to_path_buf(),
+            vmaps_dir: vmaps_dir.to_path_buf(),
         }
     }
 
@@ -191,8 +193,8 @@ impl TerrainBuilder {
         mesh_data: &mut MeshData,
         portion: Spot,
     ) -> bool {
-        let map_path = self.workdir.join(format!(
-            "maps/{:03}{:02}{:02}.map",
+        let map_path = self.maps_dir.join(format!(
+            "{:03}{:02}{:02}.map",
             map_id, tile_y, tile_x
         ));
         let mut file = match fs::File::open(&map_path) {
@@ -602,10 +604,8 @@ impl TerrainBuilder {
         tile_y: u32,
         mesh_data: &mut MeshData,
     ) -> bool {
-        let vmaps_dir = self.workdir.join("vmaps");
-
         // Load the vmtree file to find model instances
-        let vmtree_path = vmaps_dir.join(format!("{:03}.vmtree", map_id));
+        let vmtree_path = self.vmaps_dir.join(format!("{:03}.vmtree", map_id));
         let vmtree_data = match fs::read(&vmtree_path) {
             Ok(d) => d,
             Err(_) => return false,
@@ -656,7 +656,7 @@ impl TerrainBuilder {
             };
 
             // Load the actual model
-            let model_path = vmaps_dir.join(&spawn.name);
+            let model_path = self.vmaps_dir.join(&spawn.name);
             let world_model = match load_world_model(&model_path) {
                 Some(m) => m,
                 None => continue,
@@ -1006,7 +1006,9 @@ struct MapBuilder {
     tiles: BTreeMap<u32, BTreeSet<u32>>,
     debug: bool,
     off_mesh_file_path: Option<PathBuf>,
-    workdir: PathBuf,
+    maps_dir: PathBuf,
+    vmaps_dir: PathBuf,
+    mmaps_dir: PathBuf,
     skip_continents: bool,
     skip_junk_maps: bool,
     skip_battlegrounds: bool,
@@ -1025,13 +1027,15 @@ impl MapBuilder {
         skip_battlegrounds: bool,
         debug: bool,
         off_mesh_file_path: Option<&Path>,
-        workdir: &Path,
+        maps_dir: &Path,
+        vmaps_dir: &Path,
+        mmaps_dir: &Path,
     ) -> Self {
         let config = config_input_path.and_then(|p| {
             fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok())
         });
 
-        let terrain_builder = TerrainBuilder::new(skip_liquid, workdir);
+        let terrain_builder = TerrainBuilder::new(skip_liquid, maps_dir, vmaps_dir);
 
         info!("Using {} thread(s) for processing.", threads);
 
@@ -1040,7 +1044,9 @@ impl MapBuilder {
             tiles: BTreeMap::new(),
             debug,
             off_mesh_file_path: off_mesh_file_path.map(|p| p.to_path_buf()),
-            workdir: workdir.to_path_buf(),
+            maps_dir: maps_dir.to_path_buf(),
+            vmaps_dir: vmaps_dir.to_path_buf(),
+            mmaps_dir: mmaps_dir.to_path_buf(),
             skip_continents,
             skip_junk_maps,
             skip_battlegrounds,
@@ -1055,8 +1061,8 @@ impl MapBuilder {
 
     /// Scan maps/ and vmaps/ directories for available tiles
     fn discover_tiles(&mut self) {
-        let maps_dir = self.workdir.join("maps");
-        let vmaps_dir = self.workdir.join("vmaps");
+        let maps_dir = &self.maps_dir;
+        let vmaps_dir = &self.vmaps_dir;
 
         info!("Discovering maps...");
         let mut count = 0u32;
@@ -1195,10 +1201,11 @@ impl MapBuilder {
 
         // Build tiles using thread pool
         let tile_count = tiles.len() as u32;
-        let workdir = self.workdir.clone();
+        let mmaps_dir = self.mmaps_dir.clone();
         let terrain_builder = Arc::new(TerrainBuilder::new(
             self.terrain_builder.skip_liquid,
-            &self.workdir,
+            &self.maps_dir,
+            &self.vmaps_dir,
         ));
         let off_mesh_path = self.off_mesh_file_path.clone();
         let debug = self.debug;
@@ -1215,7 +1222,7 @@ impl MapBuilder {
                         let (tile_x, tile_y) = unpack_tile_id(tile_packed);
                         let cur_tile = (idx + 1) as u32;
                         let nav_params = nav_mesh_params.clone();
-                        let workdir = workdir.clone();
+                        let mmaps_dir = mmaps_dir.clone();
                         let tb = terrain_builder.clone();
                         let omp = off_mesh_path.clone();
                         let cfg_json = config_json.clone();
@@ -1223,7 +1230,7 @@ impl MapBuilder {
                         s.spawn(move |_| {
                             build_tile_worker(
                                 map_id, tile_x, tile_y, &nav_params, cur_tile, tile_count,
-                                &workdir, &tb, omp.as_deref(), debug, &cfg_json,
+                                &mmaps_dir, &tb, omp.as_deref(), debug, &cfg_json,
                             );
                         });
                     }
@@ -1237,7 +1244,7 @@ impl MapBuilder {
                     build_tile_worker(
                         map_id, tile_x, tile_y, &nav_mesh_params,
                         (idx + 1) as u32, tile_count,
-                        &workdir, &terrain_builder, off_mesh_path.as_deref(),
+                        &mmaps_dir, &terrain_builder, off_mesh_path.as_deref(),
                         debug, &config_json,
                     );
                 }
@@ -1255,10 +1262,14 @@ impl MapBuilder {
         cur_tile: u32,
         tile_count: u32,
     ) {
-        let tb = TerrainBuilder::new(self.terrain_builder.skip_liquid, &self.workdir);
+        let tb = TerrainBuilder::new(
+            self.terrain_builder.skip_liquid,
+            &self.maps_dir,
+            &self.vmaps_dir,
+        );
         build_tile_worker(
             map_id, tile_x, tile_y, nav_mesh_params, cur_tile, tile_count,
-            &self.workdir, &tb, self.off_mesh_file_path.as_deref(),
+            &self.mmaps_dir, &tb, self.off_mesh_file_path.as_deref(),
             self.debug, &self.config,
         );
     }
@@ -1294,7 +1305,7 @@ impl MapBuilder {
         };
 
         // Write .mmap file
-        let file_name = self.workdir.join(format!("mmaps/{:03}.mmap", map_id));
+        let file_name = self.mmaps_dir.join(format!("{:03}.mmap", map_id));
         match write_nav_mesh_params(&file_name, &params) {
             Ok(_) => info!("[Map {:03}] Created navMesh params", map_id),
             Err(e) => {
@@ -1336,8 +1347,8 @@ impl MapBuilder {
     }
 
     fn should_skip_tile(&self, map_id: u32, tile_x: u32, tile_y: u32) -> bool {
-        let file_name = self.workdir.join(format!(
-            "mmaps/{:03}{:02}{:02}.mmtile",
+        let file_name = self.mmaps_dir.join(format!(
+            "{:03}{:02}{:02}.mmtile",
             map_id, tile_y, tile_x
         ));
         let mut file = match fs::File::open(&file_name) {
@@ -1388,7 +1399,7 @@ impl MapBuilder {
 
     /// Build navmesh for a game object (transport/elevator)
     fn build_game_object(&self, model_name: &str, display_id: u32) {
-        let full_path = self.workdir.join("vmaps").join(model_name);
+        let full_path = self.vmaps_dir.join(model_name);
 
         info!("Building GameObject model {}", model_name);
 
@@ -1483,7 +1494,7 @@ fn build_tile_worker(
     nav_mesh_params: &NavMeshParams,
     cur_tile: u32,
     tile_count: u32,
-    workdir: &Path,
+    mmaps_dir: &Path,
     terrain_builder: &TerrainBuilder,
     off_mesh_file_path: Option<&Path>,
     debug: bool,
@@ -1534,7 +1545,7 @@ fn build_tile_worker(
     // Build the move map tile
     build_move_map_tile(
         map_id, tile_x, tile_y, &mut mesh_data, &bmin, &bmax, nav_mesh_params,
-        workdir, terrain_builder.uses_liquids(), debug, config_json,
+        mmaps_dir, terrain_builder.uses_liquids(), debug, config_json,
     );
 }
 
@@ -1547,7 +1558,7 @@ fn build_move_map_tile(
     bmin: &[f32; 3],
     bmax: &[f32; 3],
     nav_mesh_params: &NavMeshParams,
-    workdir: &Path,
+    mmaps_dir: &Path,
     uses_liquids: bool,
     debug: bool,
     config_json: &Option<serde_json::Value>,
@@ -1594,7 +1605,7 @@ fn build_move_map_tile(
             bmin, bmax,
             nav_mesh_params,
             &config,
-            workdir,
+            mmaps_dir,
             uses_liquids,
         );
     }
@@ -1623,7 +1634,7 @@ unsafe fn build_move_map_tile_unsafe(
     bmax: &[f32; 3],
     nav_mesh_params: &NavMeshParams,
     config: &RcConfig,
-    workdir: &Path,
+    mmaps_dir: &Path,
     uses_liquids: bool,
 ) {
     use recast_ffi::*;
@@ -1817,8 +1828,8 @@ unsafe fn build_move_map_tile_unsafe(
 
         if dt_create_nav_mesh_data(&mut params, &mut nav_data, &mut nav_data_size) {
             // Write to file
-            let file_name = workdir.join(format!(
-                "mmaps/{:03}{:02}{:02}.mmtile",
+            let file_name = mmaps_dir.join(format!(
+                "{:03}{:02}{:02}.mmtile",
                 map_id, tile_y, tile_x
             ));
 
@@ -2602,14 +2613,39 @@ fn read_f32_le<R: Read>(r: &mut R) -> f32 {
 
 pub fn run_movemap_gen(args: &super::MoveMapGenArgs) -> anyhow::Result<()> {
     let workdir = Path::new(&args.workdir);
-    if !workdir.exists() {
-        bail!("Workdir does not exist: {}", args.workdir);
+
+    // Resolve directory paths: use custom overrides if provided, else fall back to workdir/<name>
+    let maps_dir = match args.maps_dir {
+        Some(ref p) => PathBuf::from(p),
+        None => workdir.join("maps"),
+    };
+    let vmaps_dir = match args.vmaps_dir {
+        Some(ref p) => PathBuf::from(p),
+        None => workdir.join("vmaps"),
+    };
+    let mmaps_dir = match args.mmaps_dir {
+        Some(ref p) => PathBuf::from(p),
+        None => workdir.join("mmaps"),
+    };
+
+    // Validate input directories exist
+    if !maps_dir.exists() {
+        bail!("Maps directory does not exist: {}", maps_dir.display());
+    }
+    if !vmaps_dir.exists() {
+        bail!("VMaps directory does not exist: {}", vmaps_dir.display());
     }
 
-    // Ensure mmaps directory exists
-    let mmaps_dir = workdir.join("mmaps");
+    // Ensure mmaps output directory exists
     fs::create_dir_all(&mmaps_dir)
         .context("Failed to create mmaps directory")?;
+
+    info!(
+        "Directories: maps='{}' vmaps='{}' mmaps='{}'",
+        maps_dir.display(),
+        vmaps_dir.display(),
+        mmaps_dir.display(),
+    );
 
     let threads = args
         .threads
@@ -2627,7 +2663,9 @@ pub fn run_movemap_gen(args: &super::MoveMapGenArgs) -> anyhow::Result<()> {
         args.skip_battlegrounds,
         args.debug_output,
         if off_mesh_path.exists() { Some(off_mesh_path) } else { None },
-        workdir,
+        &maps_dir,
+        &vmaps_dir,
+        &mmaps_dir,
     );
 
     if let Some(ref tile) = args.tile {

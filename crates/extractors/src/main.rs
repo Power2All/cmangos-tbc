@@ -178,9 +178,21 @@ struct MoveMapGenArgs {
     #[arg(long = "threads")]
     threads: Option<usize>,
 
-    /// Base work directory containing maps/vmaps
+    /// Base work directory (fallback for maps/vmaps/mmaps if not specified individually)
     #[arg(long = "workdir", default_value = "./")]
     workdir: String,
+
+    /// Custom path to maps directory (overrides workdir/maps)
+    #[arg(long = "mapsDir")]
+    maps_dir: Option<String>,
+
+    /// Custom path to vmaps directory (overrides workdir/vmaps)
+    #[arg(long = "vmapsDir")]
+    vmaps_dir: Option<String>,
+
+    /// Custom path to mmaps output directory (overrides workdir/mmaps)
+    #[arg(long = "mmapsDir")]
+    mmaps_dir: Option<String>,
 }
 
 fn init_logging(log_level: Option<i32>) {
