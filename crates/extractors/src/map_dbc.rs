@@ -512,7 +512,7 @@ fn convert_adt(
 
             holes[idx] = cell.header.holes_low_res;
 
-            let base_height = cell.header.position[0];
+            let base_height = cell.header.position[2];
 
             for y in 0..=ADT_CELL_SIZE {
                 let cy = i * ADT_CELL_SIZE + y;
@@ -553,6 +553,9 @@ fn convert_adt(
             }
 
             if let Some(liquid) = &cell.liquid {
+                if cell.header.size_liquid <= 8 {
+                    continue;
+                }
                 let mut count = 0u32;
                 for y in 0..ADT_CELL_SIZE {
                     let cy = i * ADT_CELL_SIZE + y;
@@ -642,22 +645,11 @@ fn convert_adt(
                     _ => {}
                 }
 
-                if liq_type == LIQUID_TYPE_OCEAN && let Some(attrs) = &entry.attributes {
-                    let mut deep = false;
-                    for y in 0..instance.height as usize {
-                        for x in 0..instance.width as usize {
-                            let ax = x + instance.x_offset as usize;
-                            let ay = y + instance.y_offset as usize;
-                            if attrs.is_deep(ax, ay) {
-                                deep = true;
-                                break;
-                            }
-                        }
-                        if deep {
-                            break;
-                        }
-                    }
-                    if deep {
+                // Dark water detect: C++ checks if light map is absent
+                // When vertex_data is None, there's no offsData2b, so no light map exists
+                if liq_type == LIQUID_TYPE_OCEAN {
+                    let vdata = entry.vertex_data.first().and_then(|v| v.as_ref());
+                    if vdata.is_none() {
                         liquid_flags[idx] |= MAP_LIQUID_TYPE_DEEP_WATER;
                     }
                 }
@@ -671,7 +663,7 @@ fn convert_adt(
                     let cy = i * ADT_CELL_SIZE + y + instance.y_offset as usize;
                     for x in 0..=instance.width as usize {
                         let cx = j * ADT_CELL_SIZE + x + instance.x_offset as usize;
-                        let height = vertex_height(vdata, x + instance.x_offset as usize, y + instance.y_offset as usize, instance.min_height_level);
+                        let height = vertex_height(vdata, x, y, instance.min_height_level);
                         liquid_height[idx_v9(cy, cx)] = height;
                     }
                 }

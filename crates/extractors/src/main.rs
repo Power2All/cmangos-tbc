@@ -9,7 +9,16 @@ use clap::{Args, Parser, Subcommand};
 
 mod dbc;
 mod map_dbc;
+#[allow(dead_code, unused_variables)]
+mod movemap_gen;
 mod mpq;
+#[cfg(feature = "recast")]
+#[allow(dead_code)]
+mod recast_ffi;
+#[allow(dead_code, unused_variables)]
+mod vmap_assemble;
+#[allow(dead_code, unused_variables)]
+mod vmap_extract;
 
 use mangos_shared::log::{initialize_logging, map_log_level};
 
@@ -179,6 +188,7 @@ fn init_logging(log_level: Option<i32>) {
     initialize_logging(None, console_level, None);
 }
 
+#[allow(dead_code)]
 fn ensure_dir(path: &str) -> anyhow::Result<()> {
     let dir = std::path::Path::new(path);
     if !dir.exists() {
@@ -192,40 +202,11 @@ fn run_map_dbc(args: MapDbcArgs) -> anyhow::Result<()> {
 }
 
 fn run_vmap_extract(args: VmapExtractArgs) -> anyhow::Result<()> {
-    let precise_vector_data = args.large && !args.small;
-
-    tracing::info!(
-        "VMap extractor: data='{}' output='{}' precise_vector_data={}",
-        args.data_path,
-        args.output_path,
-        precise_vector_data
-    );
-
-    let data_path = std::path::Path::new(&args.data_path);
-    if !data_path.exists() {
-        anyhow::bail!("Data path does not exist: {}", args.data_path);
-    }
-    ensure_dir(&args.output_path)?;
-
-    tracing::warn!("Extractor logic not yet implemented; scaffold only.");
-    Ok(())
+    vmap_extract::run_vmap_extract(args)
 }
 
 fn run_vmap_assemble(args: VmapAssembleArgs) -> anyhow::Result<()> {
-    tracing::info!(
-        "VMap assembler: raw='{}' output='{}'",
-        args.raw_data_dir,
-        args.output_dir
-    );
-
-    let raw_dir = std::path::Path::new(&args.raw_data_dir);
-    if !raw_dir.exists() {
-        anyhow::bail!("Raw data directory does not exist: {}", args.raw_data_dir);
-    }
-    ensure_dir(&args.output_dir)?;
-
-    tracing::warn!("Assembler logic not yet implemented; scaffold only.");
-    Ok(())
+    vmap_assemble::run_vmap_assemble(args)
 }
 
 fn run_movemap_gen(args: MoveMapGenArgs) -> anyhow::Result<()> {
@@ -245,13 +226,7 @@ fn run_movemap_gen(args: MoveMapGenArgs) -> anyhow::Result<()> {
         args.build_game_objects
     );
 
-    let workdir = std::path::Path::new(&args.workdir);
-    if !workdir.exists() {
-        anyhow::bail!("Workdir does not exist: {}", args.workdir);
-    }
-
-    tracing::warn!("MoveMapGen logic not yet implemented; scaffold only.");
-    Ok(())
+    movemap_gen::run_movemap_gen(&args)
 }
 
 fn main() -> anyhow::Result<()> {

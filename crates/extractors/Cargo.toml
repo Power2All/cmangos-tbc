@@ -17,3 +17,13 @@ byteorder = { workspace = true }
 mpq = "0.8.1"
 wow-adt = "0.6.1"
 wow-wdt = "0.6.1"
+rayon = "1.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+
+[features]
+default = []
+recast = ["dep:cc"]

@@ -103,3 +103,29 @@ The code generated, has been done partly by AI (Claude.AI), and further modified
 This project has been started after letting known to one of the developers (Killerwife), which blessed my soul for attempting this blasphemy, as I told him this is purely a experiment on my end, as I've been working with Rust for quiet a while.
 
 Thus, this project should only be acknowledged as a "fun experiment", and nothing more as of this moment. Anything pushed here is done on my own and is based on the original source code from the [CMaNGOS Github](https://github.com/cmangos/), respectively the Burning Crusade code.
+
+#### Windows Requirements
+
+* Rust 1.85+ (Stable or Nightly) 2024 Edition
+* [Optional] Visual Studio Build Tools (MSVC Target) needed for cl.exe (C++ compiler) and Windows SDK
+* [Optional Alternative Compiler] MinGW-w64 (GNU Target)
+
+#### Linux/OSX Requirements
+
+* Rust 1.85+ (Stable or Nightly) 2024 Edition
+* GCC/G++
+  * Debian/Ubuntu: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && sudo apt install build-essential g++`
+  * Fedora/RHEL: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && sudo dnf groupinstall "Development Tools" && sudo dnf install gcc-c++`
+  * Arch: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && sudo pacman -S base-devel gcc`
+  * OSX: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && xcode-select --install`
+
+#### Build Commands
+
+Default (no C++ needed) — builds extractors + realmd:
+`cargo build --release`
+
+With navmesh generation (needs C++ compiler):
+`cargo build --release --features recast`
+
+Just the extractors binary with recast:
+`cargo build --release -p extractors --features recast`
