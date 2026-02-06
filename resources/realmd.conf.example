@@ -106,6 +106,23 @@ ConfVersion=2021031501
 #        1 = The Burning Crusade
 #        Default: 1
 #
+#    ConnectionTimeout
+#        Timeout in seconds for idle client connections.
+#        Applies to all read and write operations on the authentication socket.
+#        If no data is received or sent within this period, the connection is dropped.
+#        Protects against slowloris-style attacks that hold connections open indefinitely.
+#        Default: 30
+#
+#    MaxConnectionsPerIP
+#        Maximum number of simultaneous connections allowed from a single IP address.
+#        Prevents a single source from exhausting server resources.
+#        Default: 10 (0 = unlimited)
+#
+#    MaxConnections
+#        Maximum total number of simultaneous connections the server will accept.
+#        New connections beyond this limit are immediately rejected.
+#        Default: 1000 (0 = unlimited)
+#
 ###################################################################################################################
 
 LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;tbcrealmd"
@@ -122,3 +139,6 @@ WrongPass.BanTime = 600
 WrongPass.BanType = 0
 AutoCreateAccounts = 0
 AutoCreateAccounts.Expansion = 1
+ConnectionTimeout = 30
+MaxConnectionsPerIP = 10
+MaxConnections = 1000

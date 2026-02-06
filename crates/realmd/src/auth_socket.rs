@@ -26,6 +26,24 @@ use crate::auth_codes::*;
 use crate::protocol::*;
 use crate::realm_list::{self, RealmList, find_build_info, get_realm_category_id};
 
+/// Read exactly `buf.len()` bytes with a timeout.
+/// Returns an error if the read times out or fails.
+async fn read_with_timeout(stream: &mut TcpStream, buf: &mut [u8], dur: Duration) -> anyhow::Result<()> {
+    timeout(dur, stream.read_exact(buf))
+        .await
+        .map_err(|_| anyhow::anyhow!("read timeout"))??;
+    Ok(())
+}
+
+/// Write all bytes with a timeout.
+/// Returns an error if the write times out or fails.
+async fn write_with_timeout(stream: &mut TcpStream, data: &[u8], dur: Duration) -> anyhow::Result<()> {
+    timeout(dur, stream.write_all(data))
+        .await
+        .map_err(|_| anyhow::anyhow!("write timeout"))??;
+    Ok(())
+}
+
 /// Session status state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionStatus {
@@ -43,6 +61,7 @@ pub async fn handle_client(
     addr: SocketAddr,
     db: Arc<Database>,
     realm_list: Arc<tokio::sync::RwLock<RealmList>>,
+    timeout_secs: u64,
 ) {
     tracing::debug!("[{}] New connection accepted", addr);
 
@@ -62,8 +81,8 @@ pub async fn handle_client(
     let mut grid_seed: u32 = 0;
     let mut prompt_pin = false;
 
-    // Connection timeout: 30 seconds for initial data
-    let timeout_duration = Duration::from_secs(30);
+    // Configurable connection timeout for all I/O operations
+    let timeout_duration = Duration::from_secs(timeout_secs);
 
     loop {
         // Read the command byte
@@ -128,6 +147,7 @@ pub async fn handle_client(
                     &mut server_security_salt,
                     &mut grid_seed,
                     &mut prompt_pin,
+                    timeout_duration,
                 )
                 .await
             }
@@ -149,6 +169,7 @@ pub async fn handle_client(
                     &server_security_salt,
                     grid_seed,
                     &mut account_security_level,
+                    timeout_duration,
                 )
                 .await
             }
@@ -163,6 +184,7 @@ pub async fn handle_client(
                     &mut safe_login,
                     &mut build,
                     &mut reconnect_proof,
+                    timeout_duration,
                 )
                 .await
             }
@@ -177,6 +199,7 @@ pub async fn handle_client(
                     &reconnect_proof,
                     build,
                     &os,
+                    timeout_duration,
                 )
                 .await
             }
@@ -190,13 +213,17 @@ pub async fn handle_client(
                     &login,
                     build,
                     account_security_level,
+                    timeout_duration,
                 )
                 .await
             }
             AuthCmd::XferResume => {
                 tracing::debug!("[{}] XferResume - skipping 8 bytes", addr);
                 let mut buf = [0u8; 8];
-                let _ = stream.read_exact(&mut buf).await;
+                if read_with_timeout(&mut stream, &mut buf, timeout_duration).await.is_err() {
+                    tracing::debug!("[{}] XferResume read timeout/error", addr);
+                    return;
+                }
                 Ok(())
             }
             AuthCmd::XferCancel => {
@@ -247,10 +274,11 @@ async fn handle_logon_challenge(
     server_security_salt: &mut BigNumber,
     grid_seed: &mut u32,
     prompt_pin: &mut bool,
+    timeout_duration: Duration,
 ) -> Result<(), anyhow::Error> {
     // Read header (3 bytes: error + size)
     let mut header_buf = [0u8; AuthLogonChallengeHeader::SIZE];
-    stream.read_exact(&mut header_buf).await?;
+    read_with_timeout(stream, &mut header_buf, timeout_duration).await?;
 
     let header = AuthLogonChallengeHeader::from_bytes(&header_buf)
         .ok_or_else(|| anyhow::anyhow!("Invalid logon challenge header"))?;
@@ -268,7 +296,7 @@ async fn handle_logon_challenge(
 
     // Read the body
     let mut body_buf = vec![0u8; remaining];
-    stream.read_exact(&mut body_buf).await?;
+    read_with_timeout(stream, &mut body_buf, timeout_duration).await?;
 
     let body = AuthLogonChallengeBody::from_bytes(&body_buf)
         .ok_or_else(|| anyhow::anyhow!("Invalid logon challenge body"))?;
@@ -313,7 +341,7 @@ async fn handle_logon_challenge(
     if let Ok(Some(_)) = db.query_one(&ip_ban_sql).await {
         pkt.write_u8(AuthLogonResult::FailedFailNoaccess as u8);
         tracing::info!("[{}] Banned IP {} tried to login", addr, ip_str);
-        stream.write_all(pkt.contents()).await?;
+        write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
         return Ok(());
     }
 
@@ -346,7 +374,7 @@ async fn handle_logon_challenge(
                 if locked_ip != ip_str {
                     tracing::info!("[{}] Account '{}' IP lock mismatch: expected='{}' got='{}'", addr, login, locked_ip, ip_str);
                     pkt.write_u8(AuthLogonResult::FailedSuspended as u8);
-                    stream.write_all(pkt.contents()).await?;
+                    write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
                     return Ok(());
                 }
                 tracing::trace!("[{}] Account '{}' IP lock verified", addr, login);
@@ -361,7 +389,7 @@ async fn handle_logon_challenge(
             if !srp.set_verifier(&database_v) || !srp.set_salt(&database_s) {
                 pkt.write_u8(AuthLogonResult::FailedFailNoaccess as u8);
                 tracing::warn!("[{}] Broken v/s values for account '{}'", addr, login);
-                stream.write_all(pkt.contents()).await?;
+                write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
                 return Ok(());
             }
 
@@ -389,7 +417,7 @@ async fn handle_logon_challenge(
                         addr, login, account_id, expires_at
                     );
                 }
-                stream.write_all(pkt.contents()).await?;
+                write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
                 return Ok(());
             }
 
@@ -495,7 +523,7 @@ async fn handle_logon_challenge(
                                 if !srp.set_verifier(&database_v) || !srp.set_salt(&database_s) {
                                     pkt.write_u8(AuthLogonResult::FailedFailNoaccess as u8);
                                     tracing::error!("[{}] Auto-created account '{}' has broken v/s values", addr, login);
-                                    stream.write_all(pkt.contents()).await?;
+                                    write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
                                     return Ok(());
                                 }
 
@@ -548,7 +576,7 @@ async fn handle_logon_challenge(
         }
     }
 
-    stream.write_all(pkt.contents()).await?;
+    write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
     Ok(())
 }
 
@@ -571,6 +599,7 @@ async fn handle_logon_proof(
     _server_security_salt: &BigNumber,
     _grid_seed: u32,
     _account_security_level: &mut AccountTypes,
+    timeout_duration: Duration,
 ) -> Result<(), anyhow::Error> {
     // Read the proof data
     let proof_size = if prompt_pin {
@@ -582,7 +611,7 @@ async fn handle_logon_proof(
     tracing::trace!("[{}] Reading LogonProof: {} bytes (pin={})", addr, proof_size, prompt_pin);
 
     let mut proof_buf = vec![0u8; proof_size];
-    stream.read_exact(&mut proof_buf).await?;
+    read_with_timeout(stream, &mut proof_buf, timeout_duration).await?;
 
     let proof = AuthLogonProofClient::from_bytes(&proof_buf, prompt_pin)
         .ok_or_else(|| anyhow::anyhow!("Invalid logon proof"))?;
@@ -596,7 +625,7 @@ async fn handle_logon_proof(
         pkt.write_u8(0x00);
         pkt.write_u8(AuthLogonResult::FailedVersionInvalid as u8);
         tracing::info!("[{}] Account '{}' tried to login with unsupported build {}", addr, login, build);
-        stream.write_all(pkt.contents()).await?;
+        write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
         return Ok(());
     }
 
@@ -616,7 +645,7 @@ async fn handle_logon_proof(
     // srp.proof() returns true when client M1 matches our computed M = password correct
     if !srp.proof(&proof.m1) {
         // Proof did NOT match = wrong password
-        send_logon_proof_error(stream, build).await?;
+        send_logon_proof_error(stream, build, timeout_duration).await?;
         tracing::info!("[{}] Account '{}' login failed: wrong password", addr, login);
 
         // Handle failed login counting
@@ -632,23 +661,23 @@ async fn handle_logon_proof(
         tracing::debug!("[{}] Reading authenticator token for '{}'", addr, login);
         // Read authenticator token
         let mut pin_count_buf = [0u8; 1];
-        if stream.read_exact(&mut pin_count_buf).await.is_err() {
+        if read_with_timeout(stream, &mut pin_count_buf, timeout_duration).await.is_err() {
             tracing::debug!("[{}] Failed to read authenticator token length for '{}'", addr, login);
-            send_logon_proof_error(stream, build).await?;
+            send_logon_proof_error(stream, build, timeout_duration).await?;
             return Ok(());
         }
         let pin_count = pin_count_buf[0];
 
         if pin_count > 16 {
             tracing::debug!("[{}] Invalid authenticator token length {} for '{}'", addr, pin_count, login);
-            send_logon_proof_error(stream, build).await?;
+            send_logon_proof_error(stream, build, timeout_duration).await?;
             return Ok(());
         }
 
         let mut keys = vec![0u8; pin_count as usize];
-        if stream.read_exact(&mut keys).await.is_err() {
+        if read_with_timeout(stream, &mut keys, timeout_duration).await.is_err() {
             tracing::debug!("[{}] Failed to read authenticator token data for '{}'", addr, login);
-            send_logon_proof_error(stream, build).await?;
+            send_logon_proof_error(stream, build, timeout_duration).await?;
             return Ok(());
         }
 
@@ -664,7 +693,7 @@ async fn handle_logon_proof(
                 "[{}] Account '{}' authenticator mismatch: client={} expected={}",
                 addr, login, client_token, server_token
             );
-            send_logon_proof_error(stream, build).await?;
+            send_logon_proof_error(stream, build, timeout_duration).await?;
             return Ok(());
         }
 
@@ -672,12 +701,12 @@ async fn handle_logon_proof(
     }
 
     // Password (and optional authenticator) verified, finalize login
-    verify_and_finalize(stream, addr, db, status, srp, login, safe_login, safe_locale, os, platform, build, &proof).await?;
+    verify_and_finalize(stream, addr, db, status, srp, login, safe_login, safe_locale, os, platform, build, &proof, timeout_duration).await?;
     Ok(())
 }
 
 /// Send an error response for logon proof
-async fn send_logon_proof_error(stream: &mut TcpStream, build: u16) -> Result<(), anyhow::Error> {
+async fn send_logon_proof_error(stream: &mut TcpStream, build: u16, timeout_duration: Duration) -> Result<(), anyhow::Error> {
     if build > 6005 {
         let response: [u8; 4] = [
             AuthCmd::LogonProof as u8,
@@ -685,13 +714,13 @@ async fn send_logon_proof_error(stream: &mut TcpStream, build: u16) -> Result<()
             0,
             0,
         ];
-        stream.write_all(&response).await?;
+        write_with_timeout(stream, &response, timeout_duration).await?;
     } else {
         let response: [u8; 2] = [
             AuthCmd::LogonProof as u8,
             AuthLogonResult::FailedUnknownAccount as u8,
         ];
-        stream.write_all(&response).await?;
+        write_with_timeout(stream, &response, timeout_duration).await?;
     }
     Ok(())
 }
@@ -778,6 +807,7 @@ async fn verify_and_finalize(
     platform: &str,
     build: u16,
     proof: &AuthLogonProofClient,
+    timeout_duration: Duration,
 ) -> Result<(), anyhow::Error> {
     // Verify version
     tracing::trace!("[{}] Verifying client version for '{}' (build={} os='{}')", addr, login, build, os);
@@ -788,7 +818,7 @@ async fn verify_and_finalize(
             AuthCmd::LogonProof as u8,
             AuthLogonResult::FailedVersionInvalid as u8,
         ];
-        stream.write_all(&response).await?;
+        write_with_timeout(stream, &response, timeout_duration).await?;
         return Ok(());
     }
 
@@ -829,7 +859,7 @@ async fn verify_and_finalize(
     // Send proof to client
     let mut sha = Sha1Hash::new();
     srp.finalize(&mut sha);
-    send_proof(stream, build, &sha).await?;
+    send_proof(stream, build, &sha, timeout_duration).await?;
 
     *status = SessionStatus::Authed;
     tracing::debug!("[{}] '{}' -> state Authed, ready for realm list", addr, login);
@@ -841,6 +871,7 @@ async fn send_proof(
     stream: &mut TcpStream,
     build: u16,
     sha: &Sha1Hash,
+    timeout_duration: Duration,
 ) -> Result<(), anyhow::Error> {
     match build {
         5875 | 6005 | 6141 => {
@@ -852,7 +883,7 @@ async fn send_proof(
                 m2: *sha.get_digest(),
                 login_flags: 0x00,
             };
-            stream.write_all(&proof.to_bytes()).await?;
+            write_with_timeout(stream, &proof.to_bytes(), timeout_duration).await?;
         }
         _ => {
             // 2.x+ client
@@ -865,7 +896,7 @@ async fn send_proof(
                 survey_id: 0,
                 unk_flags: 0,
             };
-            stream.write_all(&proof.to_bytes()).await?;
+            write_with_timeout(stream, &proof.to_bytes(), timeout_duration).await?;
         }
     }
     Ok(())
@@ -883,10 +914,11 @@ async fn handle_reconnect_challenge(
     safe_login: &mut String,
     build: &mut u16,
     reconnect_proof: &mut BigNumber,
+    timeout_duration: Duration,
 ) -> Result<(), anyhow::Error> {
     // Read header
     let mut header_buf = [0u8; AuthLogonChallengeHeader::SIZE];
-    stream.read_exact(&mut header_buf).await?;
+    read_with_timeout(stream, &mut header_buf, timeout_duration).await?;
 
     let header = AuthLogonChallengeHeader::from_bytes(&header_buf)
         .ok_or_else(|| anyhow::anyhow!("Invalid reconnect challenge header"))?;
@@ -898,7 +930,7 @@ async fn handle_reconnect_challenge(
 
     // Read body
     let mut body_buf = vec![0u8; remaining];
-    stream.read_exact(&mut body_buf).await?;
+    read_with_timeout(stream, &mut body_buf, timeout_duration).await?;
 
     let body = AuthLogonChallengeBody::from_bytes(&body_buf)
         .ok_or_else(|| anyhow::anyhow!("Invalid reconnect challenge body"))?;
@@ -944,7 +976,7 @@ async fn handle_reconnect_challenge(
     pkt.append(&VERSION_CHALLENGE);
 
     tracing::debug!("[{}] ReconnectChallenge SUCCESS for '{}' -> state ReconProof", addr, login);
-    stream.write_all(pkt.contents()).await?;
+    write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
     Ok(())
 }
 
@@ -960,9 +992,10 @@ async fn handle_reconnect_proof(
     reconnect_proof: &BigNumber,
     build: u16,
     os: &str,
+    timeout_duration: Duration,
 ) -> Result<(), anyhow::Error> {
     let mut proof_buf = [0u8; AuthReconnectProofClient::SIZE];
-    stream.read_exact(&mut proof_buf).await?;
+    read_with_timeout(stream, &mut proof_buf, timeout_duration).await?;
 
     let proof = AuthReconnectProofClient::from_bytes(&proof_buf)
         .ok_or_else(|| anyhow::anyhow!("Invalid reconnect proof"))?;
@@ -994,7 +1027,7 @@ async fn handle_reconnect_proof(
             let mut pkt = ByteBuffer::new();
             pkt.write_u8(AuthCmd::ReconnectProof as u8);
             pkt.write_u8(AuthLogonResult::FailedVersionInvalid as u8);
-            stream.write_all(pkt.contents()).await?;
+            write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
             return Ok(());
         }
 
@@ -1002,7 +1035,7 @@ async fn handle_reconnect_proof(
         pkt.write_u8(AuthCmd::ReconnectProof as u8);
         pkt.write_u8(AuthLogonResult::Success as u8);
         pkt.write_u16(0x00);
-        stream.write_all(pkt.contents()).await?;
+        write_with_timeout(stream, pkt.contents(), timeout_duration).await?;
 
         *status = SessionStatus::Authed;
         tracing::info!("[{}] User '{}' successfully reconnected (build={})", _addr, login, build);
@@ -1024,10 +1057,11 @@ async fn handle_realm_list(
     login: &str,
     build: u16,
     account_security_level: AccountTypes,
+    timeout_duration: Duration,
 ) -> Result<(), anyhow::Error> {
     // Skip 4 bytes of padding from client
     let mut skip_buf = [0u8; 4];
-    stream.read_exact(&mut skip_buf).await?;
+    read_with_timeout(stream, &mut skip_buf, timeout_duration).await?;
 
     tracing::debug!("[{}] RealmList request from '{}' (build={})", _addr, login, build);
 
@@ -1072,7 +1106,7 @@ async fn handle_realm_list(
     hdr.append(pkt.contents());
 
     tracing::trace!("[{}] RealmList response: {} bytes total", _addr, hdr.size());
-    stream.write_all(hdr.contents()).await?;
+    write_with_timeout(stream, hdr.contents(), timeout_duration).await?;
     Ok(())
 }
 

@@ -12,10 +12,13 @@ mod auth_socket;
 mod protocol;
 mod realm_list;
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
+use parking_lot::Mutex;
 use tokio::net::TcpListener;
 
 use mangos_shared::config::get_config;
@@ -24,6 +27,70 @@ use mangos_shared::log::{initialize_logging, map_log_level};
 use mangos_shared::MINUTE;
 
 use realm_list::RealmList;
+
+/// Tracks active connections per-IP and total, enforcing configurable limits.
+struct ConnectionTracker {
+    per_ip: HashMap<IpAddr, u32>,
+    total: u32,
+    max_per_ip: u32,
+    max_total: u32,
+}
+
+impl ConnectionTracker {
+    fn new(max_per_ip: u32, max_total: u32) -> Self {
+        Self {
+            per_ip: HashMap::new(),
+            total: 0,
+            max_per_ip,
+            max_total,
+        }
+    }
+
+    /// Try to register a new connection from `ip`.
+    /// Returns `false` if the connection would exceed per-IP or total limits.
+    fn try_add(&mut self, ip: IpAddr) -> bool {
+        // Check total limit (0 = unlimited)
+        if self.max_total > 0 && self.total >= self.max_total {
+            return false;
+        }
+        // Check per-IP limit (0 = unlimited)
+        if self.max_per_ip > 0 {
+            let count = self.per_ip.entry(ip).or_insert(0);
+            if *count >= self.max_per_ip {
+                return false;
+            }
+            *count += 1;
+        }
+        self.total += 1;
+        true
+    }
+
+    /// Unregister a connection from `ip`. Called when the connection drops.
+    fn remove(&mut self, ip: IpAddr) {
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = self.per_ip.entry(ip) {
+            let count = entry.get_mut();
+            if *count <= 1 {
+                entry.remove();
+            } else {
+                *count -= 1;
+            }
+        }
+        self.total = self.total.saturating_sub(1);
+    }
+}
+
+/// RAII guard that automatically calls `ConnectionTracker::remove()` on drop.
+/// Ensures connection tracking cleanup even on panics or early returns.
+struct ConnectionGuard {
+    tracker: Arc<Mutex<ConnectionTracker>>,
+    ip: IpAddr,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.tracker.lock().remove(self.ip);
+    }
+}
 
 /// Default realm server port
 const DEFAULT_REALMSERVER_PORT: i32 = 3724;
@@ -148,6 +215,25 @@ async fn main() -> anyhow::Result<()> {
         .execute("DELETE FROM ip_banned WHERE expires_at <= UNIX_TIMESTAMP() AND expires_at <> banned_at")
         .await;
 
+    // Read connection security settings
+    let (connection_timeout, max_per_ip, max_total) = {
+        let config = get_config().lock();
+        (
+            config.get_int_default("ConnectionTimeout", 30) as u64,
+            config.get_int_default("MaxConnectionsPerIP", 10) as u32,
+            config.get_int_default("MaxConnections", 1000) as u32,
+        )
+    };
+
+    tracing::info!(
+        "Connection limits: timeout={}s max_per_ip={} max_total={} (0=unlimited)",
+        connection_timeout,
+        max_per_ip,
+        max_total
+    );
+
+    let tracker = Arc::new(Mutex::new(ConnectionTracker::new(max_per_ip, max_total)));
+
     // Start the TCP listener
     let bind_ip = {
         let config = get_config().lock();
@@ -202,10 +288,30 @@ async fn main() -> anyhow::Result<()> {
             result = listener.accept() => {
                 match result {
                     Ok((stream, addr)) => {
+                        let ip = addr.ip();
+
+                        // Enforce connection limits
+                        let allowed = tracker.lock().try_add(ip);
+                        if !allowed {
+                            tracing::warn!(
+                                "[{}] Connection rejected: limit exceeded (per_ip={} total={})",
+                                addr, max_per_ip, max_total
+                            );
+                            // Drop `stream` immediately by not spawning
+                            continue;
+                        }
+
                         let db = db.clone();
                         let realm_list = realm_list.clone();
+                        let tracker_clone = tracker.clone();
+
                         tokio::spawn(async move {
-                            auth_socket::handle_client(stream, addr, db, realm_list).await;
+                            // RAII guard ensures tracker.remove(ip) on any exit
+                            let _guard = ConnectionGuard {
+                                tracker: tracker_clone,
+                                ip,
+                            };
+                            auth_socket::handle_client(stream, addr, db, realm_list, connection_timeout).await;
                         });
                     }
                     Err(e) => {
