@@ -123,6 +123,16 @@ ConfVersion=2021031501
 #        New connections beyond this limit are immediately rejected.
 #        Default: 1000 (0 = unlimited)
 #
+#    RealmStaleTimeout
+#        Seconds without database updates before realmd considers a realm stale
+#        and overrides its status to offline (in-memory only, DB is not modified).
+#        The worldserver periodically updates population and flags in the database;
+#        if those updates stop (e.g. crash), realmd will show the realm as offline
+#        after this timeout. When the worldserver recovers and updates the database
+#        again, the realm will automatically be shown as online on the next poll.
+#        Set to 0 to disable stale detection (original behavior).
+#        Default: 60
+#
 ###################################################################################################################
 
 LoginDatabaseInfo = "127.0.0.1;3306;mangos;mangos;tbcrealmd"
@@ -142,3 +152,4 @@ AutoCreateAccounts.Expansion = 1
 ConnectionTimeout = 30
 MaxConnectionsPerIP = 10
 MaxConnections = 1000
+RealmStaleTimeout = 60

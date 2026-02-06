@@ -192,13 +192,16 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(login_db);
 
     // Initialize realm list
-    let update_interval = {
+    let (update_interval, stale_timeout) = {
         let config = get_config().lock();
-        config.get_int_default("RealmsStateUpdateDelay", 20) as u32
+        (
+            config.get_int_default("RealmsStateUpdateDelay", 20) as u32,
+            config.get_int_default("RealmStaleTimeout", 60) as i64,
+        )
     };
 
     let mut realm_list = RealmList::new();
-    realm_list.initialize(update_interval, &db).await;
+    realm_list.initialize(update_interval, stale_timeout, &db).await;
 
     if realm_list.size() == 0 {
         tracing::error!("No valid realms specified.");

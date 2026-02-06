@@ -156,6 +156,12 @@ pub struct Realm {
     pub population_level: f32,
     pub realm_builds: BTreeSet<u32>,
     pub realm_build_info: RealmBuildInfo,
+    /// In-memory only: unix timestamp when realm DB data last changed (heartbeat)
+    pub last_seen_alive: i64,
+    /// In-memory only: population from previous poll (for change detection)
+    pub prev_population: f32,
+    /// In-memory only: raw DB realmflags from previous poll (for change detection)
+    pub prev_realm_flags: u8,
 }
 
 /// The realm list manager
@@ -164,6 +170,8 @@ pub struct RealmList {
     realms: Arc<RwLock<BTreeMap<String, Realm>>>,
     update_interval: u32,
     next_update_time: i64,
+    /// Seconds without DB changes before a realm is considered stale (0 = disabled)
+    stale_timeout: i64,
 }
 
 impl RealmList {
@@ -172,14 +180,22 @@ impl RealmList {
             realms: Arc::new(RwLock::new(BTreeMap::new())),
             update_interval: 0,
             next_update_time: 0,
+            stale_timeout: 0,
         }
     }
 
     /// Initialize the realm list with periodic update interval
-    pub async fn initialize(&mut self, update_interval: u32, db: &Database) {
-        tracing::debug!("Initializing realm list (update interval: {}s)", update_interval);
+    pub async fn initialize(&mut self, update_interval: u32, stale_timeout: i64, db: &Database) {
+        tracing::debug!(
+            "Initializing realm list (update interval: {}s, stale timeout: {}s{})",
+            update_interval,
+            stale_timeout,
+            if stale_timeout == 0 { " (disabled)" } else { "" }
+        );
         self.update_interval = update_interval;
-        self.update_realms(db, true).await;
+        self.stale_timeout = stale_timeout;
+        let empty = BTreeMap::new();
+        self.update_realms(db, true, &empty).await;
     }
 
     /// Update the realm list if the update interval has passed
@@ -199,13 +215,26 @@ impl RealmList {
 
         tracing::debug!("Realm list update interval expired, refreshing from database");
         self.next_update_time = now + self.update_interval as i64;
+
+        // Snapshot old realm heartbeat data before clearing
+        let old_realms = self.realms.read().clone();
         self.realms.write().clear();
-        self.update_realms(db, false).await;
+        self.update_realms(db, false, &old_realms).await;
     }
 
     /// Load realms from the database
-    async fn update_realms(&mut self, db: &Database, init: bool) {
+    async fn update_realms(
+        &mut self,
+        db: &Database,
+        init: bool,
+        old_realms: &BTreeMap<String, Realm>,
+    ) {
         tracing::debug!("Updating Realm List...");
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
 
         let sql = "SELECT id, name, address, port, \
                    CAST(icon AS SIGNED) AS icon, \
@@ -250,6 +279,9 @@ impl RealmList {
                         realm_flags &= valid_flags;
                     }
 
+                    // Save the raw DB flags before any stale override (for next poll comparison)
+                    let raw_realm_flags = realm_flags;
+
                     let security_level = if allowed_security_level <= SEC_ADMINISTRATOR {
                         allowed_security_level
                     } else {
@@ -291,13 +323,35 @@ impl RealmList {
                         }
                     };
 
+                    // Heartbeat: detect if any DB data changed since last poll
+                    let (prev_pop, prev_flags, prev_alive) = match old_realms.get(&name) {
+                        Some(old) => (old.prev_population, old.prev_realm_flags, old.last_seen_alive),
+                        None => (f32::NAN, 0xFF, now), // new realm = alive now
+                    };
+
+                    let data_changed = population != prev_pop || raw_realm_flags != prev_flags;
+                    let last_seen_alive = if data_changed || init { now } else { prev_alive };
+
+                    // Stale override: if no DB updates for too long AND DB says online → show offline
+                    if self.stale_timeout > 0
+                        && raw_realm_flags & RealmFlags::REALM_FLAG_OFFLINE == 0
+                        && now - last_seen_alive > self.stale_timeout
+                    {
+                        tracing::warn!(
+                            "Realm '{}' (id {}) stale (no DB updates for {}s, timeout {}s), showing as offline",
+                            name, id, now - last_seen_alive, self.stale_timeout
+                        );
+                        realm_flags |= RealmFlags::REALM_FLAG_OFFLINE;
+                    }
+
                     let full_address = format!("{}:{}", address, port);
 
                     tracing::debug!(
                         "Realm '{}': id={} address='{}' icon={} flags=0x{:02X} timezone={} \
-                         security={} population={:.1} builds='{}'",
+                         security={} population={:.1} builds='{}' alive={}s_ago",
                         name, id, full_address, icon, realm_flags, timezone,
-                        security_level, population, builds_str
+                        security_level, population, builds_str,
+                        now - last_seen_alive
                     );
 
                     let realm = Realm {
@@ -310,6 +364,9 @@ impl RealmList {
                         population_level: population,
                         realm_builds,
                         realm_build_info: build_info,
+                        last_seen_alive,
+                        prev_population: population,
+                        prev_realm_flags: raw_realm_flags,
                     };
 
                     if init {
