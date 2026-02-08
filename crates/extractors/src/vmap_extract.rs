@@ -163,6 +163,7 @@ struct VmapContext {
     unique_ids: UniqueIds,
     wmo_doodads: HashMap<String, WmoDoodadData>,
     failed_paths: HashSet<String>,
+    all_files: std::collections::BTreeSet<String>,
 }
 
 pub fn run_vmap_extract(args: VmapExtractArgs, _threads: usize) -> anyhow::Result<()> {
@@ -203,6 +204,8 @@ pub fn run_vmap_extract(args: VmapExtractArgs, _threads: usize) -> anyhow::Resul
         );
     }
 
+    let all_files = mpq.list_files();
+
     let mut context = VmapContext {
         mpq,
         output_root,
@@ -211,6 +214,7 @@ pub fn run_vmap_extract(args: VmapExtractArgs, _threads: usize) -> anyhow::Resul
         unique_ids: UniqueIds::default(),
         wmo_doodads: HashMap::new(),
         failed_paths: HashSet::new(),
+        all_files,
     };
 
     tracing::info!("Extract for VMAPs05. Beginning work ....");
@@ -431,12 +435,48 @@ struct MpqFile {
 }
 
 impl MpqFile {
-    fn open(mpq: &mut MpqManager, filename: &str) -> Option<Self> {
-        let data = mpq.open_file(filename)?;
-        if data.len() <= 1 {
-            return None;
+    fn open(mpq: &mut MpqManager, filename: &str, all_files: &std::collections::BTreeSet<String>) -> Option<Self> {
+        // Try the exact filename first
+        if let Some(data) = mpq.open_file(filename) {
+            if data.len() > 1 {
+                return Some(Self { data, pos: 0 });
+            }
         }
-        Some(Self { data, pos: 0 })
+
+        // Try with forward slashes
+        let forward = filename.replace('\\', "/");
+        if let Some(data) = mpq.open_file(&forward) {
+            if data.len() > 1 {
+                return Some(Self { data, pos: 0 });
+            }
+        }
+
+        // Try with backslashes
+        let back = filename.replace('/', "\\");
+        if let Some(data) = mpq.open_file(&back) {
+            if data.len() > 1 {
+                return Some(Self { data, pos: 0 });
+            }
+        }
+
+        // Case-insensitive lookup - MPQ filenames have inconsistent capitalization
+        // but the listfile contains the actual case needed for opening
+        let lower_filename = filename.to_ascii_lowercase();
+        let lower_forward = forward.to_ascii_lowercase();
+        let lower_back = back.to_ascii_lowercase();
+
+        for file in all_files {
+            let lower_file = file.to_ascii_lowercase();
+            if lower_file == lower_filename || lower_file == lower_forward || lower_file == lower_back {
+                if let Some(data) = mpq.open_file(file) {
+                    if data.len() > 1 {
+                        return Some(Self { data, pos: 0 });
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn is_eof(&self) -> bool {
@@ -589,7 +629,7 @@ fn extract_single_model(
         return Ok(Some(fixed_name));
     }
 
-    let Some(file) = MpqFile::open(&mut context.mpq, &path) else {
+    let Some(file) = MpqFile::open(&mut context.mpq, &path, &context.all_files) else {
         context.failed_paths.insert(path);
         return Ok(None);
     };
@@ -693,6 +733,18 @@ fn extract_wmos(context: &mut VmapContext) -> anyhow::Result<()> {
 
     for name in wmo_files {
         let mut fname = name;
+        // Skip group files (they have _XXX.wmo pattern)
+        let plain_name = get_plain_name(&fname);
+        if let Some(pos) = plain_name.rfind('_') {
+            let suffix = &plain_name[pos..];
+            let chars: Vec<char> = suffix.chars().collect();
+            if chars.len() >= 4 {
+                let digit_count = chars[1..4].iter().filter(|c| c.is_ascii_digit()).count();
+                if digit_count == 3 {
+                    continue;
+                }
+            }
+        }
         extract_single_wmo(context, &mut fname)?;
     }
 
@@ -741,7 +793,6 @@ fn extract_single_wmo(context: &mut VmapContext, fname: &mut str) -> anyhow::Res
         group_name.push_str(&format!("_{:03}.wmo", idx));
 
         let Some(mut group) = WmoGroup::open(context, &group_name)? else {
-            tracing::warn!("Could not open all Group file for: {}", fixed);
             real_groups = real_groups.saturating_sub(1);
             continue;
         };
@@ -765,6 +816,10 @@ fn extract_single_wmo(context: &mut VmapContext, fname: &mut str) -> anyhow::Res
         }
     }
 
+    if real_groups == 0 && root.n_groups > 0 {
+        tracing::warn!("WMO {} has {} groups but none were loaded successfully", fixed, root.n_groups);
+    }
+
     output.seek(SeekFrom::Start(8))?;
     output.write_u32::<LittleEndian>(total_triangles)?;
     output.seek(SeekFrom::Start(12))?;
@@ -777,8 +832,37 @@ fn extract_single_wmo(context: &mut VmapContext, fname: &mut str) -> anyhow::Res
 }
 
 impl WmoRoot {
+    fn file_exists_in_mpq(context: &VmapContext, filename: &str) -> bool {
+        // Check exact match first
+        if context.all_files.contains(filename) {
+            return true;
+        }
+
+        // Check with forward slashes
+        let forward_slash = filename.replace('\\', "/");
+        if context.all_files.contains(&forward_slash) {
+            return true;
+        }
+
+        // Check with backslashes
+        let back_slash = filename.replace('/', "\\");
+        if context.all_files.contains(&back_slash) {
+            return true;
+        }
+
+        // Check case-insensitive
+        let lower_filename = filename.to_ascii_lowercase();
+        for file in &context.all_files {
+            if file.to_ascii_lowercase() == lower_filename
+                || file.replace('\\', "/").to_ascii_lowercase() == lower_filename.replace('\\', "/").to_ascii_lowercase() {
+                return true;
+            }
+        }
+        false
+    }
+
     fn open(context: &mut VmapContext, filename: &str) -> anyhow::Result<Option<Self>> {
-        let Some(mut file) = MpqFile::open(&mut context.mpq, filename) else {
+        let Some(mut file) = MpqFile::open(&mut context.mpq, filename, &context.all_files) else {
             return Ok(None);
         };
 
@@ -915,7 +999,7 @@ impl WmoRoot {
 
 impl WmoGroup {
     fn open(context: &mut VmapContext, filename: &str) -> anyhow::Result<Option<Self>> {
-        let Some(mut file) = MpqFile::open(&mut context.mpq, filename) else {
+        let Some(mut file) = MpqFile::open(&mut context.mpq, filename, &context.all_files) else {
             return Ok(None);
         };
 
@@ -945,13 +1029,14 @@ impl WmoGroup {
         };
 
         while !file.is_eof() {
-            let (fourcc, mut size, nextpos) = match read_chunk_header(&mut file) {
+            let (fourcc, mut size, mut nextpos) = match read_chunk_header(&mut file) {
                 Ok(header) => header,
                 Err(_) => break,
             };
 
             if fourcc == "MOGP" {
                 size = 68;
+                nextpos = file.position() + (size as usize);  // Recalculate nextpos with corrected size
             }
 
             match fourcc.as_str() {
@@ -1184,6 +1269,8 @@ impl WmoGroup {
                 header.liquid_type as u32
             } else if header.liquid_type == 15 {
                 0
+            } else if header.liquid_type < 0 {
+                0  // Handle negative liquid_type values safely
             } else {
                 header.liquid_type as u32 + 1
             };
@@ -1284,28 +1371,43 @@ fn read_map_dbc(context: &mut VmapContext) -> anyhow::Result<Vec<MapEntry>> {
 fn parse_maps(context: &mut VmapContext, maps: &[MapEntry]) -> anyhow::Result<()> {
     for map in maps {
         let wdt_name = format!("World\\Maps\\{}\\{}.wdt", map.name, map.name);
-        let Some(wdt_bytes) = context.mpq.open_file(&wdt_name) else {
-            continue;
-        };
+        let wdt_result = context.mpq.open_file(&wdt_name);
 
-        let wdt = match read_wdt(&wdt_bytes) {
-            Ok(value) => value,
-            Err(err) => {
-                if is_missing_mver(&err) {
-                    tracing::warn!("Skipping map {} due to WDT parse error: {}", map.name, err);
-                    continue;
+        let has_wdt = wdt_result.is_some();
+        let mut wdt: Option<wow_wdt::WdtFile> = None;
+
+        if let Some(wdt_bytes) = wdt_result {
+            match read_wdt(&wdt_bytes) {
+                Ok(value) => {
+                    wdt = Some(value);
                 }
-                return Err(err);
+                Err(err) => {
+                    // C++ version is lenient with WDT parsing - it still tries to process ADT files
+                    // even if WDT is malformed or missing MVER
+                    tracing::warn!("Map {} WDT parse error: {}, attempting to process ADT files directly", map.name, err);
+                }
             }
-        };
-        parse_wdt_global_wmo(context, map, &wdt)?;
+        }
 
+        // Try to parse global WMO if WDT was successfully read
+        if let Some(ref wdt_file) = wdt {
+            parse_wdt_global_wmo(context, map, wdt_file)?;
+        }
+
+        // Process ADT tiles - either from WDT info or by checking if files exist
         for x in 0..64 {
             for y in 0..64 {
-                let Some(tile) = wdt.get_tile(x, y) else {
-                    continue;
+                // Check if tile should be processed based on WDT or file existence
+                let should_process = if let Some(ref wdt_file) = wdt {
+                    // Use WDT tile information if available
+                    wdt_file.get_tile(x, y).map_or(false, |tile| tile.has_adt)
+                } else {
+                    // If no valid WDT, check if ADT file exists directly
+                    let adt_name = format!("World\\Maps\\{}\\{}_{}_{}.adt", map.name, map.name, x, y);
+                    context.mpq.open_file(&adt_name).is_some()
                 };
-                if !tile.has_adt {
+
+                if !should_process {
                     continue;
                 }
 
@@ -1329,6 +1431,22 @@ fn parse_maps(context: &mut VmapContext, maps: &[MapEntry]) -> anyhow::Result<()
 }
 
 fn read_wdt(data: &[u8]) -> anyhow::Result<wow_wdt::WdtFile> {
+    // Try different WoW versions - some maps may be from different expansions
+    // TBC is the primary target for this project, but WotLK maps might exist
+    let versions = [
+        WowVersion::TBC,
+        WowVersion::WotLK,  // WotLK for Northrend maps
+    ];
+
+    for version in &versions {
+        let mut reader = WdtReader::new(Cursor::new(data), *version);
+        match reader.read() {
+            Ok(wdt) => return Ok(wdt),
+            Err(_) => continue, // Try next version
+        }
+    }
+
+    // If all versions fail, return error with the TBC attempt
     let mut reader = WdtReader::new(Cursor::new(data), WowVersion::TBC);
     reader.read().map_err(|err| anyhow::anyhow!(err))
 }

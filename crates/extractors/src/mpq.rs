@@ -23,11 +23,21 @@ impl MpqManager {
 
     pub fn open_file(&mut self, filename: &str) -> Option<Vec<u8>> {
         for archive in &mut self.archives {
-            if let Ok(file) = archive.open_file(filename) {
-                let mut buf = vec![0u8; file.size() as usize];
-                if file.read(archive, &mut buf).is_ok() {
-                    return Some(buf);
-                }
+            // Handle empty files gracefully - the mpq crate throws an error for 0-byte files
+            let file_result = archive.open_file(filename);
+            let file = match file_result {
+                Ok(f) => f,
+                Err(_) => continue, // Skip files that can't be opened (including 0-byte files)
+            };
+
+            let size = file.size() as usize;
+            if size == 0 {
+                continue; // Skip empty files
+            }
+
+            let mut buf = vec![0u8; size];
+            if file.read(archive, &mut buf).is_ok() {
+                return Some(buf);
             }
         }
         None

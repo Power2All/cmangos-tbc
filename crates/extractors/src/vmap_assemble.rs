@@ -347,11 +347,12 @@ fn read_map_spawns(raw_dir: &Path, map_data: &mut BTreeMap<u32, MapSpawns>) -> a
 
 fn write_map_files(output_dir: &Path, map_id: u32, spawns: &MapSpawns) -> anyhow::Result<()> {
     let mut map_spawns = Vec::new();
+    // Only include spawns that have bounds (WMO models with MOD_HAS_BOUND)
+    // M2 models (MOD_M2) without bounds are handled separately and get bounds calculated later
     for spawn in spawns.unique_entries.values() {
-        if spawn.bound.is_none() {
-            anyhow::bail!("Spawn {} has no bounds", spawn.name);
+        if spawn.bound.is_some() {
+            map_spawns.push(spawn);
         }
-        map_spawns.push(spawn);
     }
 
     let (bih, node_index) = build_map_bih(&map_spawns);
